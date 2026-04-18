@@ -33,6 +33,7 @@ import torch.optim as optim
 EXACT_SOLVER_IMPORT_ERROR = None
 # `exact` 数据监督优先走主 solver，失败时再退回老版本 solver。
 # 这里保留两条导入链，主要是为了兼容我之前仓库里的不同 exact 实现。
+# for test
 try:
     from scr_exact_bvp_solver import (
         solve_scr_exact,
