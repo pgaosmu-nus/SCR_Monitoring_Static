@@ -134,10 +134,10 @@ class ParameterRanges:
     Ub_max: float = 0.8
     p_min: float = 1.0 / 7.0
     p_max: float = 1.0 / 3.0
-    Dx_min: float = 1400.0
-    Dx_max: float = 2100.0
-    ht_min: float = 0.0
-    ht_max: float = 100.0
+    Dx_min: float = 1700.0
+    Dx_max: float = 1900.0
+    ht_min: float = -10.0
+    ht_max: float = 10.0
 
 
 @dataclass
