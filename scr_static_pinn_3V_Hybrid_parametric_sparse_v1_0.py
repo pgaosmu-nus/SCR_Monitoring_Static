@@ -243,7 +243,7 @@ class ParametricTrainingConfig:
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     n_nodes: int = 256
-    physics_batch_size: int = 12  # number of random parameter cases used in each PDE/BC training batch.
+    physics_batch_size: int = 32  # number of random parameter cases used in each PDE/BC training batch.
     adam_steps: int = 20000
     print_every: int = 500
     plot_every: int = 2000
