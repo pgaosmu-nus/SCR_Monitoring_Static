@@ -34,26 +34,15 @@ EXACT_SOLVER_IMPORT_ERROR = None
 # `exact` 数据监督优先走主 solver，失败时再退回老版本 solver。
 # 这里保留两条导入链，主要是为了兼容我之前仓库里的不同 exact 实现。
 # for test
-try:
-    from scr_exact_bvp_solver import (
+# test 2
+
+from scr_exact_bvp_solver import (
         solve_scr_exact,
         compute_local_resultants_from_global,
         PhysicalConfig as ExactPhysicalConfig,
         SolverConfig as ExactSolverConfig,
-    )
-    EXACT_SOLVER_AVAILABLE = True
-except Exception as exc:
-    try:
-        from scr_exact_bvp_solver_thetaMHV_v1 import (
-            solve_scr_exact,
-            compute_local_resultants_from_global,
-            PhysicalConfig as ExactPhysicalConfig,
-            SolverConfig as ExactSolverConfig,
-        )
-        EXACT_SOLVER_AVAILABLE = True
-    except Exception as exc_fallback:
-        EXACT_SOLVER_AVAILABLE = False
-        EXACT_SOLVER_IMPORT_ERROR = f"primary={repr(exc)}; fallback={repr(exc_fallback)}"
+)
+EXACT_SOLVER_AVAILABLE = True
 
 
 @dataclass
