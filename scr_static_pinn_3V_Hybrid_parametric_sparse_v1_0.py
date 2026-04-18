@@ -153,7 +153,6 @@ class NetworkConfig:
 
 @dataclass
 class HybridConfig:
-    adam_steps: int = 12000
     lr: float = 5.0e-4
     weight_decay: float = 0.0
     grad_clip: float = 1.0
@@ -1064,7 +1063,6 @@ def train_hybrid_parametric_sparse(
     out_dir = ensure_dir(train_cfg.output_dir)
     rng = np.random.default_rng(train_cfg.seed)
     # Keep the hybrid schedule aligned with the actual training length used here.
-    hybrid_cfg.adam_steps = int(train_cfg.adam_steps)
     hybrid_cfg.ensure_schedule(train_cfg.adam_steps)
     model = SCRStaticPINNMT(net_cfg).to(train_cfg.device)
     optimizer = optim.Adam(model.parameters(), lr=hybrid_cfg.lr, weight_decay=hybrid_cfg.weight_decay)
