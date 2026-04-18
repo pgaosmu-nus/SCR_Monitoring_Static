@@ -165,15 +165,46 @@ class HybridConfig:
     data_w_Q: float = 0.5
     tdp_data_weight: float = 2.0
     top_data_weight: float = 3.0
-    schedule_steps: List[int] = field(default_factory=lambda: list(range(0, 20000, 1000)))
-    schedule_w_data: List[float] = field(default_factory=lambda: np.geomspace(1.0, 0.15, 20).tolist())
-    schedule_w_pde: List[float] = field(default_factory=lambda: np.geomspace(0.2, 1.2, 20).tolist())
-    schedule_grad_ratio_target: List[float] = field(default_factory=lambda: np.geomspace(10.0, 0.1, 20).tolist())
+    schedule_num_stages: int = 20
+    schedule_steps: Optional[List[int]] = None
+    schedule_w_data: Optional[List[float]] = None
+    schedule_w_pde: Optional[List[float]] = None
+    schedule_grad_ratio_target: Optional[List[float]] = None
     grad_balance_every: int = 20
     grad_balance_alpha: float = 0.1
     grad_balance_eps: float = 1.0e-12
     grad_balance_corr_min: float = 0.005
     grad_balance_corr_max: float = 20.0
+
+    def ensure_schedule(self, adam_steps: int) -> None:
+        """Build the default staircase schedule from the actual training length.
+
+        If the four schedule lists are all provided explicitly, keep them as-is.
+        Otherwise, generate a matched schedule automatically from `adam_steps`.
+        """
+        explicit = [
+            self.schedule_steps,
+            self.schedule_w_data,
+            self.schedule_w_pde,
+            self.schedule_grad_ratio_target,
+        ]
+        if all(item is not None for item in explicit):
+            n_items = len(self.schedule_steps)
+            if not (
+                n_items == len(self.schedule_w_data)
+                == len(self.schedule_w_pde)
+                == len(self.schedule_grad_ratio_target)
+            ):
+                raise ValueError("Explicit hybrid schedules must have the same length.")
+            return
+        if any(item is not None for item in explicit):
+            raise ValueError("Provide either all hybrid schedule lists or none of them.")
+
+        n_stages = max(int(self.schedule_num_stages), 1)
+        self.schedule_steps = np.linspace(0, max(int(adam_steps) - 1, 0), n_stages, dtype=int).tolist()
+        self.schedule_w_data = np.geomspace(1.0, 0.15, n_stages).tolist()
+        self.schedule_w_pde = np.geomspace(0.2, 1.2, n_stages).tolist()
+        self.schedule_grad_ratio_target = np.geomspace(10.0, 0.1, n_stages).tolist()
 
 
 @dataclass
@@ -202,9 +233,9 @@ class FullStageConfig:
 
 @dataclass
 class SparseParametricDataConfig:
-    reference_source: str = "exact"
-    num_cases: int = 24
-    batch_size: int = 6
+    reference_source: str = "exact"  # "exact" or "catenary": how the reference fields for data supervision are generated. "exact" for exact solver，"catenary" for catenary aaproximation.
+    num_cases: int = 24    # number of sparse parameter anchors with data supervision. Better be <= 48 for the current parameter ranges to avoid duplicates.
+    batch_size: int = 24    # number of sparse parameter-space data cases used in each training step; keep it <= num_cases for sampling without replacement.
     max_sample_attempts: int = 5000
 
 
@@ -213,9 +244,9 @@ class ParametricTrainingConfig:
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     n_nodes: int = 256
-    physics_batch_size: int = 12
-    adam_steps: int = 12000
-    print_every: int = 200
+    physics_batch_size: int = 12  # number of random parameter cases used in each PDE/BC training batch.
+    adam_steps: int = 20000
+    print_every: int = 500
     plot_every: int = 2000
     output_dir: str = "scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0"
 
@@ -1032,6 +1063,9 @@ def train_hybrid_parametric_sparse(
     set_seed(train_cfg.seed)
     out_dir = ensure_dir(train_cfg.output_dir)
     rng = np.random.default_rng(train_cfg.seed)
+    # Keep the hybrid schedule aligned with the actual training length used here.
+    hybrid_cfg.adam_steps = int(train_cfg.adam_steps)
+    hybrid_cfg.ensure_schedule(train_cfg.adam_steps)
     model = SCRStaticPINNMT(net_cfg).to(train_cfg.device)
     optimizer = optim.Adam(model.parameters(), lr=hybrid_cfg.lr, weight_decay=hybrid_cfg.weight_decay)
     element_edges = build_explicit_mesh_edges(phys, full_cfg)
