@@ -85,6 +85,7 @@ class PhysicalConfig:
     def I(self) -> float:
         return np.pi / 64.0 * (self.D_o**4 - self.D_i**4)
 
+
     @property
     def EA(self) -> float:
         return self.E_steel * self.A_s
