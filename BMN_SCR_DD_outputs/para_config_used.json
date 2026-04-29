@@ -1,0 +1,107 @@
+{
+  "physical": {
+    "D_o": 0.4064,
+    "t": 0.0254,
+    "E_steel": 210000000000.0,
+    "rho_s": 7850.0,
+    "rho_w": 1025.0,
+    "g": 9.81,
+    "C_d": 1.2,
+    "L": 2500.0,
+    "water_depth": 1000.0,
+    "x_bottom": 0.0,
+    "k_b": 5000.0
+  },
+  "ranges": {
+    "Us_min": 0.5,
+    "Us_max": 2.5,
+    "Ub_min": 0.0,
+    "Ub_max": 0.8,
+    "p_min": 0.14285714285714285,
+    "p_max": 0.3333333333333333,
+    "Dx_min": 1700.0,
+    "Dx_max": 1900.0,
+    "ht_min": -10.0,
+    "ht_max": 10.0
+  },
+  "exact_solver": {
+    "use_fast_solver_first": true,
+    "verbose": false,
+    "tol_stage0": 0.0001,
+    "tol_stage1": 0.0003,
+    "tol_stage2": 0.0003,
+    "max_nodes": 50000,
+    "max_nodes_fast": 12000
+  },
+  "dataset": {
+    "n_cases": 200,
+    "n_nodes": 256,
+    "seed": 42,
+    "max_sample_attempts": 50000,
+    "output_dir": "BMN_SCR_DD_outputs",
+    "full_dataset_filename": "decoder_fullfield_dataset.npz",
+    "encoder_dataset_filename": "bmn_encoder_dataset.npz",
+    "output_vars": [
+      "x",
+      "z",
+      "theta",
+      "T",
+      "M"
+    ],
+    "observation_vars": [
+      "T",
+      "M",
+      "theta"
+    ],
+    "sensor_indices": [],
+    "sensor_s": [],
+    "n_default_sensors": 6,
+    "train_fraction": 0.8,
+    "val_fraction": 0.1,
+    "save_failed_cases": true
+  },
+  "decoder_network": {
+    "hidden_dim": 256,
+    "num_hidden_layers": 5,
+    "activation": "tanh",
+    "dropout": 0.0
+  },
+  "decoder_training": {
+    "seed": 42,
+    "device": "cuda",
+    "epochs": 2000,
+    "batch_size": 8192,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "print_every": 100,
+    "patience": 300,
+    "model_filename": "Decoder_DD_model.pth",
+    "history_filename": "Decoder_DD_history.json"
+  },
+  "encoder_network": {
+    "architecture": "bounded_mlp",
+    "hidden_dim": 256,
+    "num_hidden_layers": 4,
+    "activation": "gelu",
+    "dropout": 0.0,
+    "use_layer_norm": true,
+    "bounded_output": true
+  },
+  "encoder_training": {
+    "seed": 42,
+    "device": "cuda",
+    "epochs": 1500,
+    "batch_size": 128,
+    "lr": 0.001,
+    "weight_decay": 0.0,
+    "grad_clip": 1.0,
+    "print_every": 100,
+    "patience": 300,
+    "model_filename": "BMN_DD_encoder.pth",
+    "history_filename": "BMN_DD_history.json",
+    "lambda_response": 0.0,
+    "lambda_observation": 0.0,
+    "lambda_order": 1.0
+  }
+}
