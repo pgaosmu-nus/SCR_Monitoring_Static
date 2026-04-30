@@ -4,7 +4,8 @@ outputs/
 #VS code workspace settings
 *.code-workspace
 
-#Vanda logs
+#Vanda logs and errors
+*.nfs*
 *.o*
 
 # Byte-compiled / optimized / DLL files
