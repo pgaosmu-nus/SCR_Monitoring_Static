@@ -1,42 +1,43 @@
 #!/bin/bash
-# 1. ������ҵ����
+# 1. PBS job settings
 #PBS -N Decoder_DD_Test
-# �ؼ�������֮ǰ�� qstat -q����ȷ�� auto_free ����Ч���У�������� Unknown Queue�����Ϊ gpu
+# Important: before submitting, run qstat -q to confirm auto_free is available.
+# If you see "Unknown Queue", change it to gpu.
 #PBS -q auto_free
-# ��Դ���룺�������趨�� 6��/50GB ����
+# Resource request: adjust ncpus, memory, and GPU count as needed.
 #PBS -l select=1:ncpus=6:mpiprocs=1:ompthreads=6:mem=50gb:ngpus=1
 #PBS -l walltime=24:00:00
 #PBS -j oe
 
-# 2. ���׽�� UnicodeEncodeError (�����޸�)
-# ��ִ���κ� python ����ǰ��ǿ���趨��������Ϊ UTF-8
+# 2. Prevent UnicodeEncodeError
+# Force the runtime locale to UTF-8 before running any Python command.
 export LC_ALL=en_US.UTF-8
 export LANG=en_US.UTF-8
 export PYTHONIOENCODING=utf-8
 
-# 3. ���빤��Ŀ¼
+# 3. Enter the working directory
 cd $PBS_O_WORKDIR
 
-# 4. ��������
+# 4. Load required modules
 module purge
 module load Python/3.11.3-GCCcore-12.3.0
 module load CUDA/12.1.1 
 
-# ������������
+# Clear potentially conflicting Python environment variables.
 unset PYTHONHOME
 unset PYTHONPATH
 
-# 5. �����������
-echo "========== ���л������ =========="
-echo "����ʼʱ��: $(date)"
-echo "��ǰ Python ·��: $(which python)"
-# �������Ƿ���Ч
+# 5. Print runtime environment information
+echo "========== Runtime Environment Check =========="
+echo "Job start time: $(date)"
+echo "Current Python path: $(which python)"
+# Verify the environment is active.
 python -c "import sys; print('defualt code:', sys.getdefaultencoding())"
 python --version
-# ��֤ PyTorch (sm_86 ������)
+# Verify PyTorch and GPU availability.
 python -c "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('GPU Spec:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
 echo "=================================="
 
-# 6. ִ���о�����
-# ʹ�� -u ȷ�����ʵʱд����־
+# 6. Run the research script
+# Use -u to ensure output is written to the log in real time.
 python -u Decoder_DD.py
