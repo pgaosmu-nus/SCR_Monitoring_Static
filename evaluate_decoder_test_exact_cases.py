@@ -33,7 +33,7 @@ from Decoder_DD import (
 )
 
 
-DEFAULT_OUTPUT_DIRNAME = "decoder_test_exact_comparison"
+DEFAULT_OUTPUT_DIRNAME = "outputs/decoder_test_exact_comparison"
 REQUIRED_VARS = ["x", "z", "theta", "T", "M"]
 
 
@@ -271,7 +271,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default=str(repo_dir / "BMN_SCR_DD_outputs" / "Decoder_DD_model.pth"),
+        default=str(repo_dir / "outputs" / "BMN_SCR_DD_outputs" / "Decoder_DD_model.pth"),
         help="Path to trained Decoder_DD checkpoint.",
     )
     parser.add_argument(

@@ -152,7 +152,7 @@ class DatasetConfig:
     n_nodes: int = 256
     seed: int = 42
     max_sample_attempts: int = 50000
-    output_dir: str = "BMN_SCR_DD_outputs"
+    output_dir: str = "outputs/BMN_SCR_DD_outputs"
     full_dataset_filename: str = "decoder_fullfield_dataset.npz"
     encoder_dataset_filename: str = "bmn_encoder_dataset.npz"
     output_vars: List[str] = field(default_factory=lambda: ["x", "z", "theta", "T", "M"])

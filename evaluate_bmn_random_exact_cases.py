@@ -37,7 +37,7 @@ from Decoder_DD import (
 )
 
 
-DEFAULT_OUTPUT_DIRNAME = "bmn_random_exact_comparison"
+DEFAULT_OUTPUT_DIRNAME = "outputs/bmn_random_exact_comparison"
 REQUIRED_VARS = ["x", "z", "theta", "T", "M"]
 
 
@@ -300,7 +300,7 @@ def run_bmn_inverse_random_exact_cases(
 def main() -> None:
     repo_dir = Path(__file__).resolve().parent
     default_output_dir = repo_dir / DEFAULT_OUTPUT_DIRNAME
-    default_ckpt_dir = repo_dir / "BMN_SCR_DD_outputs"
+    default_ckpt_dir = repo_dir / "outputs" / "BMN_SCR_DD_outputs"
 
     parser = argparse.ArgumentParser(description="Evaluate BMN inverse pipeline on random exact-solver cases")
     parser.add_argument(

@@ -40,7 +40,7 @@
     "n_nodes": 256,
     "seed": 42,
     "max_sample_attempts": 50000,
-    "output_dir": "BMN_SCR_DD_outputs",
+    "output_dir": "outputs/BMN_SCR_DD_outputs",
     "full_dataset_filename": "decoder_fullfield_dataset.npz",
     "encoder_dataset_filename": "bmn_encoder_dataset.npz",
     "output_vars": ["x","z","theta","T","M"],   
