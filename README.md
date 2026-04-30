@@ -1,230 +1,388 @@
 # SCR_Monitoring_Static
-A package for SCR field construction based on limited monitoring points
 
-这个仓库目前主要围绕静态 SCR 的 PINN / Hybrid PINN 建模做实验。
+Static SCR monitoring and inversion experiments based on a two-stage BMN-SCR-DD pipeline.
 
-我现在重点保留和推进的是 3V 路线，即：
+The current mainline workflow is:
 
-- 状态变量取 `theta(s), T(s), M(s)`
-- 几何 `x(s), z(s)` 由 `theta(s)` 积分重建
-- `Hybrid` 思路不是纯 PDE，也不是纯 data，而是把 `data + PDE + BC` 放在同一个训练框架里
+1. train a data-driven `Decoder`
+2. freeze that Decoder
+3. train an `Encoder` that maps sparse observations to global parameters
+4. reconstruct the full SCR response through `Encoder -> Decoder`
 
-当前这个仓库里，和这一条路线最直接相关的脚本是：
+## Overview
 
-- [scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.py](./scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.py)
+This repository currently contains three related tracks:
 
-## 1. 这个版本在做什么
+- `scr_exact_bvp_solver.py`: exact static SCR boundary-value solver
+- `Decoder_DD.py`: pure data-driven Decoder training and dataset generation
+- `BMN_DD.py`: Decoder-guided Encoder training and inverse inference
 
-`scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.py` 是一个**单文件可运行**的 parametric hybrid PINN。
+The active inverse workflow is not end-to-end joint training. `BMN_DD.py` assumes a pre-trained Decoder checkpoint already exists, loads it in frozen mode, and then trains only the Encoder.
 
-它做的事情是：
+## BMN Formulation
 
-- 输入参数取 `Us, Ub, p, Dx, ht`
-- 网络学习一个条件化 decoder
-- decoder 输入是 `[s, Us, Ub, p, Dx, ht]`
-- decoder 输出是 `theta(s), M(s), T(s)`
-- 在参数空间中：
-  - 对大量随机 case，只施加 `PDE + BC`
-  - 对少量离散 data cases，施加**整场** `data loss`
+The variables are split into:
 
-这里所谓的 sparse，不是 `s` 上稀疏，而是**参数空间里稀疏**。
+- known conditions `c = [Dx, ht]`
+- unknown global parameters `mu = [Us, Ub, p]`
+- arc-length coordinate `s`
+- full response `y(s) = [x, z, theta, T, M]`
+- sparse observation `o = [x_top, z_top, T_i, M_i, theta_i, ...]`
 
-换句话说：
+The current model roles are:
 
-- `physics batch` 负责覆盖参数域
-- `data case bank` 负责在参数空间里提供少量锚点
-- 每个 data case 上仍然做全场监督，思路和 single-case hybrid v1_0 一致
+- Decoder: `(s, c, mu) -> y(s)`
+- Encoder: `o -> mu_hat`
+- Full BMN inverse reconstruction: `o -> Encoder -> mu_hat -> Decoder -> y_hat`
 
-## 2. 文件结构
+In `BMN_DD.py`, the Decoder is wrapped as a frozen differentiable forward model. It can provide observation-consistency gradients, but its parameters are not updated during Encoder training.
 
-目前没有刻意整理成 package，主要还是脚本驱动。和这个版本直接相关的文件有：
+## Repository Structure
 
-- [scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.py](./scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.py)
-- [scr_exact_bvp_solver.py](./scr_exact_bvp_solver.py)
-- [scr_exact_bvp_solver_thetaMHV_v1.py](./scr_exact_bvp_solver_thetaMHV_v1.py)
+Main files:
 
-其中：
+- `Decoder_DD.py`
+- `BMN_DD.py`
+- `scr_exact_bvp_solver.py`
+- `evaluate_decoder_test_exact_cases.py`
+- `evaluate_bmn_random_exact_cases.py`
+- `para_config.json`
+- `physics_config.json`
 
-- `parametric_sparse_v1_0` 已经是 standalone，不依赖旧的 `scr_static_pinn_3V_Hybrid_v1_0.py`
-- exact 参考优先走 `scr_exact_bvp_solver.py`
-- 如果主 solver 导入失败，会自动尝试 fallback solver
+Default outputs are now placed under:
 
-## 3. 模型定义
+- `outputs/`
 
-### 输入
+Important default output subfolders:
 
-网络输入固定为 6 维：
+- `outputs/BMN_SCR_DD_outputs/`: trained checkpoints, datasets, histories, metrics
+- `outputs/decoder_test_exact_comparison/`: Decoder vs exact test-case figures
+- `outputs/bmn_random_exact_comparison/`: BMN inverse vs exact random-case figures
 
-```text
-[s, Us, Ub, p, Dx, ht]
-```
+## Physical Meaning
 
-其中：
+The exact solver and data-driven models use the following default physical quantities:
 
-- `s` 是弧长坐标，归一化到 `[0,1]`
-- 其余参数按各自范围归一化到 `[-1,1]`
+- geometry:
+  - `x(s)`, `z(s)`
+- internal response:
+  - `theta(s)`, `T(s)`, `M(s)`
+- known top conditions:
+  - `Dx`: top horizontal offset
+  - `ht`: top height parameter
+- current-profile parameters:
+  - `Us`: surface current velocity
+  - `Ub`: bottom current velocity
+  - `p`: current-profile exponent
 
-### 输出
+## Configuration Files
 
-网络输出是 3 个量：
+The main configuration is now split into two files:
 
-```text
-theta(s), M(s), T(s)
-```
+- `para_config.json`: ranges, dataset settings, network settings, training settings, output paths
+- `physics_config.json`: physical constants shared by the exact solver, Decoder data generation, and BMN inverse workflow
 
-其中：
+Both files are standard JSON files and should be edited without comments.
 
-- `theta(0)=0` 通过输出锚定实现
-- `M(0)=M(L)=0` 通过 endpoint elimination 精确满足
-- `T(s)=T0+T_res(s)`，其中 `T0` 是全局可学习量
+`physics_config.json` stores the `physical` block only. It is loaded through `para_config.json`, then merged into the runtime `cfg.physical` object used by:
 
-### 派生量
+- exact-case generation in `Decoder_DD.py`
+- frozen-Decoder Encoder-data generation in `BMN_DD.py`
+- exact-solver-based evaluation scripts
 
-由输出进一步得到：
-
-- `Q(s) = dM/ds`
-- `x(s), z(s)` 由 `theta(s)` 积分重建
-- `qt(s), qn(s)` 由全局载荷投影得到
-
-## 4. Hybrid 损失
-
-这个版本里总损失仍然保持 hybrid 结构：
-
-```text
-L = w_data * L_data + w_pde * L_pde + lambda_bc * L_bc
-```
-
-其中：
-
-- `L_data`：只在稀疏参数 case 集上施加
-- `L_pde`：在每步随机采样的 physics cases 上施加
-- `L_bc`：同样在 physics cases 上施加
-
-`L_data` 仍然是整场监督，包含：
-
-- `x`
-- `z`
-- `theta`
-- `T`
-- `M`
-- `Q`
-
-`L_pde` 包含：
-
-- `theta` 方程强形式
-- `T` 方程强形式
-- `M` 方程弱形式
-
-这点和之前的 3V hybrid v1_0 保持一致，没有另起炉灶。
-
-## 5. 参数空间与采样
-
-默认参数范围写在 `ParameterRanges` 中：
-
-```python
-Us_min, Us_max = 0.5, 2.5
-Ub_min, Ub_max = 0.0, 0.8
-p_min,  p_max  = 1/7, 1/3
-Dx_min, Dx_max = 1400.0, 2100.0
-ht_min, ht_max = 0.0, 100.0
-```
-
-采样时目前做了两层约束：
-
-1. `Us >= Ub`
-2. 几何可行性过滤
-
-几何可行性这里用的是当前 2D 单调 SCR 构型下的基本筛选：
+`para_config.json` points to `physics_config.json` through:
 
 ```text
-sqrt(Dx^2 + (water_depth - ht)^2) <= L
-L <= Dx + (water_depth - ht)
+"physics_config": "physics_config.json"
 ```
 
-这不是最终的工程可行域定义，但足够把明显无效的样本先剔掉。
+## Default Parameter Ranges
 
-## 6. exact data case bank
+The current default ranges in `para_config.json` and `Decoder_DD.py` are:
 
-如果 `reference_source='exact'`，data case bank 的构造方式是：
+```text
+Us in [0.5, 2.5]
+Ub in [0.0, 0.8]
+p  in [1/7, 1/3] = [0.142857..., 0.333333...]
+Dx in [1700.0, 1900.0] m
+ht in [-10.0, 10.0] m
+```
 
-- 在参数域中随机采样 case
-- 对每个 case 调 exact solver
-- 只有 exact 成功的 case 才保留
-- 一直重复，直到收集够 `num_cases`
+Sampling constraints:
 
-所以：
+- `Us >= Ub`
+- geometry admissibility must pass the built-in screen in `sample_one_case(...)`
 
-- exact 并不是“导入能成功就所有 case 都能解”
-- parametric 版里 exact 失败，更多时候是采样到的 case 对 exact solver 不友好
-- 这不是单文件脚本的 bug，而是参数域和 exact solver 可解域之间的关系问题
+## Default Physical Constants
 
-如果只是 smoke test，直接把 `reference_source` 改成 `catenary` 即可。
+Current default physical settings from `physics_config.json`:
 
-## 7. 运行方式
+```text
+D_o = 0.4064 m
+t = 0.0254 m
+E_steel = 2.1e11 Pa
+rho_s = 7850 kg/m^3
+rho_w = 1025 kg/m^3
+g = 9.81 m/s^2
+C_d = 1.2
+L = 2500 m
+water_depth = 1000 m
+x_bottom = 0.0 m
+k_b = 5.0e3
+```
 
-最直接的跑法：
+## Default Dataset and Training Settings
+
+Current defaults from `para_config.json`:
+
+### Dataset
+
+```text
+decoder_n_cases = 200
+encoder_n_cases = 20000
+n_nodes = 256
+seed = 42
+train_fraction = 0.8
+val_fraction = 0.1
+output_vars = [x, z, theta, T, M]
+observation_vars = [T, M, theta]
+n_default_sensors = 6
+output_dir = outputs/BMN_SCR_DD_outputs
+```
+
+If `sensor_indices` and `sensor_s` are left empty, internal sensors are generated automatically.
+
+### Decoder Network
+
+```text
+hidden_dim = 256
+num_hidden_layers = 5
+activation = tanh
+dropout = 0.0
+```
+
+### Decoder Training
+
+```text
+epochs = 2000
+batch_size = 8192
+lr = 1e-3
+weight_decay = 0.0
+grad_clip = 1.0
+patience = 300
+device = cuda
+```
+
+### Encoder Network
+
+```text
+architecture = bounded_mlp
+hidden_dim = 256
+num_hidden_layers = 4
+activation = gelu
+dropout = 0.0
+use_layer_norm = true
+bounded_output = true
+```
+
+### Encoder Training
+
+```text
+epochs = 1500
+batch_size = 128
+lr = 1e-3
+weight_decay = 0.0
+grad_clip = 1.0
+patience = 300
+lambda_observation = 0.0
+lambda_order = 0.0
+device = cuda
+```
+
+## Decoder Workflow
+
+`Decoder_DD.py` is responsible for:
+
+1. sampling valid parameter cases
+2. calling the exact solver
+3. generating `decoder_fullfield_dataset.npz`
+4. training a pure data-supervised Decoder
+5. optionally extracting an Encoder dataset from the exact-response dataset
+
+Core mapping:
+
+```text
+[s, Dx, ht, Us, Ub, p] -> [x, z, theta, T, M]
+```
+
+The Decoder is trained on scaled pointwise data assembled from full-field cases.
+
+## Encoder / BMN Workflow
+
+`BMN_DD.py` currently supports two Encoder-data routes:
+
+1. exact-dataset-derived observation data
+2. frozen-Decoder-generated observation data
+
+The active default path is:
+
+```text
+sample (c, mu)
+-> frozen Decoder
+-> full response y_D
+-> sparse observation o_D
+-> Encoder training pair (o_D, mu)
+```
+
+Encoder training loss is:
+
+```text
+L = L_mu + lambda_observation * L_obs + lambda_order * L_order
+```
+
+where:
+
+- `L_mu`: parameter supervision loss on `mu`
+- `L_obs`: observation consistency through the frozen Decoder
+- `L_order`: soft penalty for non-physical `Ub > Us`
+
+Important implementation note:
+
+- `BMN_DD.py` does not train `Decoder_DD`
+- it only reads a trained Decoder checkpoint
+- if the Decoder checkpoint does not exist, training stops with an error
+
+## Typical Usage
+
+### 1. Train Decoder
+
+Generate exact-solver Decoder data and train the Decoder:
 
 ```bash
-python scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.py
+python Decoder_DD.py --mode all
 ```
 
-脚本内部的默认配置在几个 dataclass 里：
+Or split into steps:
 
-- `NetworkConfig`
-- `HybridConfig`
-- `FullStageConfig`
-- `SparseParametricDataConfig`
-- `ParametricTrainingConfig`
+```bash
+python Decoder_DD.py --mode generate
+python Decoder_DD.py --mode train_decoder
+```
 
-如果只想做 smoke test，建议直接在脚本外写一个小入口，手动缩小：
+This produces files under:
 
-- `hidden_dim`
-- `num_hidden_layers`
-- `n_nodes`
-- `physics_batch_size`
-- `num_cases`
-- `adam_steps`
+- `outputs/BMN_SCR_DD_outputs/`
 
-## 8. 当前建议的调试顺序
+especially:
 
-我现在实际采用的顺序是：
+- `decoder_fullfield_dataset.npz`
+- `Decoder_DD_model.pth`
+- `Decoder_DD_history.json`
 
-1. 先用 `catenary` 跑 smoke test，确认训练循环、autograd、batch 维都正常
-2. 再切到 `exact`
-3. 再去讨论正式训练的默认参数
+### 2. Build Encoder Data
 
-这样可以把“代码路径错误”和“exact case 不可解”这两类问题分开。
+Using the frozen Decoder:
 
-## 9. 输出内容
+```bash
+python BMN_DD.py --mode build_data
+```
 
-训练完成后，输出目录中通常会包含：
+This creates:
 
-- `scr_static_pinn_3V_Hybrid_parametric_sparse_v1_0.pth`
-- `history_hybrid.json`
-- `config.json`
-- `sparse_case_bank.json`
-- `training_history.png`
-- `final_prediction_anchor_case.png`
-- `final_anchor_curves.npz`
+- `outputs/BMN_SCR_DD_outputs/bmn_encoder_dataset.npz`
 
-这里的可视化默认只画一个 anchor case，用来快速看训练是否跑偏。
+### 3. Train Encoder
 
-## 10. 当前限制
+```bash
+python BMN_DD.py --mode train
+```
 
-目前这版还是 `v1_0`，我自己把它定位成“先把 parametric hybrid 主干立住”的版本，所以有几个限制是明确存在的：
+Or build data and train in one shot:
 
-- 还没有引入 encoder / inverse 模块
-- 还没有做更系统的参数域设计
-- data case 采样策略目前还是随机 + 过滤，不是最优设计
-- 对 exact solver 的成功域还没有单独建模
-- README 也只覆盖这一条主线，不覆盖仓库中所有历史脚本
+```bash
+python BMN_DD.py --mode all
+```
 
-## 11. 后续方向
+This produces:
 
-这版站稳以后，后面的工作就比较清楚了：
+- `BMN_DD_encoder.pth`
+- `BMN_DD_history.json`
+- `BMN_DD_test_metrics.json`
 
-1. 先把 parametric decoder 训稳
-2. 再把 sparse observations -> parameter inference 的模块 A 接上
-3. 最后做 A + B 的联合微调
+all under:
 
-也就是说，这个文件的角色不是最终系统，而是双模块系统里的 decoder 基座。
+- `outputs/BMN_SCR_DD_outputs/`
+
+## Evaluation Scripts
+
+### Decoder vs Exact on held-out test set
+
+```bash
+python evaluate_decoder_test_exact_cases.py
+```
+
+Default output:
+
+- `outputs/decoder_test_exact_comparison/`
+
+### BMN inverse vs Exact on random cases
+
+```bash
+python evaluate_bmn_random_exact_cases.py --n_cases 50 --device cpu
+```
+
+This script:
+
+- samples 50 random valid cases
+- solves them with the exact solver
+- extracts observations using the trained Encoder's sensor layout
+- runs `Encoder -> Decoder`
+- saves one 4-panel figure per case
+- writes `evaluation_summary.json`
+
+Default output:
+
+- `outputs/bmn_random_exact_comparison/`
+
+## Config Notes
+
+The main configuration lives in `para_config.json`, and physical constants live in `physics_config.json`.
+
+Two dataset-size fields are intentionally separated:
+
+- `decoder_n_cases`: exact-solver cases used for Decoder dataset generation
+- `encoder_n_cases`: cases used for Encoder dataset generation
+
+The legacy field `n_cases` is kept only for backward compatibility and should not be used as the main control anymore.
+
+## Current Status
+
+With the current default setup:
+
+- Decoder and Encoder are trained in two stages
+- Encoder training is stable with large enough `encoder_n_cases`
+- `bounded_mlp` is active for Encoder training
+- all default outputs are centralized under `outputs/`
+
+## Limitations
+
+- the main BMN path is still based on a frozen Decoder, not joint optimization
+- exact-solver success still depends on sampled-case feasibility
+- current observation layout is still configuration-driven, not automatically optimized
+- robustness to observation noise is not yet a first-class training feature
+
+## Quick Start
+
+If you only want the shortest working path:
+
+```bash
+python Decoder_DD.py --mode all
+python BMN_DD.py --mode all
+python evaluate_bmn_random_exact_cases.py --n_cases 50 --device cpu
+```
+
+That will give you:
+
+- a trained Decoder
+- a trained Encoder
+- random exact-case BMN-vs-exact comparison figures

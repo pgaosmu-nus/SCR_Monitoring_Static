@@ -293,13 +293,41 @@ def config_from_dict(data: Dict[str, Any]) -> BMNConfig:
 def load_config(path: str | Path) -> BMNConfig:
     path = Path(path)
     with open(path, "r", encoding="utf-8") as f:
-        return config_from_dict(json.load(f))
+        data = json.load(f)
+    cfg = config_from_dict(data)
+    physics_ref = str(data.get("physics_config", "physics_config.json"))
+    physics_path = Path(physics_ref)
+    if not physics_path.is_absolute():
+        physics_path = path.parent / physics_path
+    if physics_path.exists():
+        with open(physics_path, "r", encoding="utf-8") as f:
+            physics_data = json.load(f)
+        physical_block = physics_data.get("physical", physics_data)
+        if isinstance(physical_block, dict):
+            _update_dataclass_from_dict(cfg.physical, physical_block)
+    return cfg
 
 
-def save_config(cfg: BMNConfig, path: str | Path) -> None:
+def save_config(
+    cfg: BMNConfig,
+    path: str | Path,
+    physics_path: Optional[str | Path] = None,
+    physics_ref: str = "physics_config.json",
+) -> None:
+    path = Path(path)
+    cfg_dict = asdict(cfg)
+    cfg_dict.pop("physical", None)
+    cfg_dict["physics_config"] = physics_ref
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cfg_dict, f, indent=2, ensure_ascii=False)
+    if physics_path is not None:
+        save_physics_config(cfg.physical, physics_path)
+
+
+def save_physics_config(phys: PhysicalConfig, path: str | Path) -> None:
     path = Path(path)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(asdict(cfg), f, indent=2, ensure_ascii=False)
+        json.dump({"physical": asdict(phys)}, f, indent=2, ensure_ascii=False)
 
 
 @dataclass
@@ -547,7 +575,12 @@ def generate_decoder_dataset(cfg: BMNConfig) -> Path:
     if cfg.dataset.save_failed_cases:
         with open(out_dir / "decoder_dataset_failed_cases.json", "w", encoding="utf-8") as f:
             json.dump(failed_cases, f, indent=2, ensure_ascii=False)
-    save_config(cfg, out_dir / "para_config_used.json")
+    save_config(
+        cfg,
+        out_dir / "para_config_used.json",
+        physics_path=out_dir / "physics_config_used.json",
+        physics_ref="physics_config_used.json",
+    )
     print("=" * 88)
     print(f"Dataset generation finished: {save_path}")
     print(f"Successful cases: {len(params)} | failed attempts: {len(failed_cases)}")
@@ -863,8 +896,11 @@ def build_encoder_dataset(cfg: BMNConfig, dataset_path: Optional[str | Path] = N
 
 def make_default_config(path: str | Path) -> None:
     cfg = BMNConfig()
-    save_config(cfg, path)
-    print(f"Default para_config.json written to: {Path(path).resolve()}")
+    path = Path(path)
+    physics_path = path.parent / "physics_config.json"
+    save_config(cfg, path, physics_path=physics_path, physics_ref="physics_config.json")
+    print(f"Default para_config.json written to: {path.resolve()}")
+    print(f"Default physics_config.json written to: {physics_path.resolve()}")
 
 
 def main() -> None:
