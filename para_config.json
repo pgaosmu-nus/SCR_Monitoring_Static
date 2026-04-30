@@ -87,7 +87,7 @@
     "weight_decay": 0.0,
     "grad_clip": 1.0,
     "print_every": 100,
-    "patience": 300,
+    "patience": 0,
     "model_filename": "BMN_DD_encoder.pth",
     "history_filename": "BMN_DD_history.json",
     "lambda_response": 0.0,
