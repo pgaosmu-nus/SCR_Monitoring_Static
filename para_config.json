@@ -35,24 +35,16 @@
   },
   "dataset": {
     "n_cases": 200,
+    "decoder_n_cases": 200,
+    "encoder_n_cases": 20000,
     "n_nodes": 256,
     "seed": 42,
     "max_sample_attempts": 50000,
     "output_dir": "BMN_SCR_DD_outputs",
     "full_dataset_filename": "decoder_fullfield_dataset.npz",
     "encoder_dataset_filename": "bmn_encoder_dataset.npz",
-    "output_vars": [
-      "x",
-      "z",
-      "theta",
-      "T",
-      "M"
-    ],
-    "observation_vars": [
-      "T",
-      "M",
-      "theta"
-    ],
+    "output_vars": ["x","z","theta","T","M"],   
+    "observation_vars": ["T","M","theta"],
     "sensor_indices": [],
     "sensor_s": [],
     "n_default_sensors": 6,
@@ -80,11 +72,11 @@
     "history_filename": "Decoder_DD_history.json"
   },
   "encoder_network": {
+    "architecture": "bounded_mlp",
     "hidden_dim": 256,
     "num_hidden_layers": 4,
     "activation": "gelu",
     "dropout": 0.0,
-    "architecture": "bounded_mlp",
     "use_layer_norm": true,
     "bounded_output": true
   },
@@ -102,6 +94,6 @@
     "history_filename": "BMN_DD_history.json",
     "lambda_response": 0.0,
     "lambda_observation": 0.0,
-    "lambda_order": 1.0
+    "lambda_order": 0.0
   }
 }

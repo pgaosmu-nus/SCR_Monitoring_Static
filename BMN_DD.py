@@ -3,22 +3,28 @@
 """
 BMN_DD.py
 
-BMN-SCR-DD v0.2: bidirectional mapping network for SCR static response-field inversion.
+BMN-SCR-DD v0.3: Decoder-guided Encoder training for SCR static response-field inversion.
 
-This file implements the Encoder part of the proposed framework:
+This file implements the BMN Encoder under the frozen-Decoder strategy:
 
-    sparse observation o  ->  global parameters mu_hat  ->  frozen Decoder  ->  full response y_hat
+    observation o -> Encoder E_psi -> parameter mu_hat
+    (c, mu_hat) -> frozen Decoder D_phi* -> full response y_hat -> observation o_hat
 
-Default definitions are consistent with Decoder_DD.py:
-- observation o: [x_top, z_top, T_i, M_i, theta_i, ...]
-- known condition c: [Dx, ht]
-- parameter mu: [Us, Ub, p]
-- frozen Decoder input: [s, Dx, ht, Us, Ub, p]
+Training loss:
 
-The baseline training follows the paper idea: Encoder is trained by parameter-space supervision.
-The default Encoder is a PIBAE-inspired bounded MLP: it uses LayerNorm/GELU hidden blocks and
-a sigmoid-bounded physical-parameter head. Optional decoder-assisted response/observation losses are
-included through config switches, but default to 0.0.
+    L = L_mu + lambda_observation * L_obs
+
+where
+    L_mu  = ||E_psi(o_D) - mu||^2
+    L_obs = ||P(D_phi*(c, E_psi(o_D))) - o_D||^2
+
+No order constraint and no full-response loss are used in this version.
+The default `build_data` mode generates Encoder data using the frozen Decoder itself:
+
+    (c, mu) -> D_phi*(c, mu) -> y_D -> P(y_D) -> o_D
+
+Thus Encoder and Decoder are not jointly optimized, but Encoder training still receives
+observation-consistency gradients through the frozen Decoder.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Sequence
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -43,20 +49,18 @@ from Decoder_DD import (
     PARAM_NAMES,
     DenseMLP,
     StandardScaler,
-    build_encoder_dataset,
-    config_from_dict,
     decode_fullfield_np,
-    extract_observations_from_fields,
+    get_encoder_n_cases,
     load_config,
     load_decoder_model,
     resolve_sensor_indices,
-    save_config,
+    sample_one_case,
     set_seed,
 )
 
 
 # =============================================================================
-# 1. Dataset and model loading
+# 1. Dataset utilities and Encoder model
 # =============================================================================
 
 
@@ -76,8 +80,8 @@ def split_indices(n: int, train_fraction: float, val_fraction: float, seed: int)
     train = idx[:n_train]
     val = idx[n_train:n_train + n_val]
     test = idx[n_train + n_val:]
-    if val.size == 0:
-        val = test[: min(1, test.size)]
+    if val.size == 0 and test.size > 0:
+        val = test[:1]
     return {"train": train, "val": val, "test": test}
 
 
@@ -95,71 +99,8 @@ def make_loader(obs: np.ndarray, mu: np.ndarray, c: np.ndarray, y: np.ndarray, b
     )
 
 
-class BoundedPIBAEEncoder(nn.Module):
-    """PIBAE-inspired bounded Encoder for SCR parameter inversion.
-
-    Differences from the uploaded PIBAE_Encoder.py:
-    1. The observation dimension is not hard-coded; it follows the BMN dataset.
-    2. Inputs still use the dataset-derived StandardScaler, rather than fixed T/M constants.
-    3. The network outputs physical parameters inside prescribed ranges via a sigmoid head,
-       then converts them to the same scaled parameter space used by the training loss.
-    """
-
-    def __init__(
-        self,
-        obs_dim: int,
-        mu_names: Sequence[str],
-        mu_bounds: Dict[str, Tuple[float, float]],
-        mu_scaler: StandardScaler,
-        hidden_dim: int = 256,
-        num_hidden_layers: int = 4,
-        activation: str = "gelu",
-        dropout: float = 0.0,
-        use_layer_norm: bool = True,
-    ) -> None:
-        super().__init__()
-        if num_hidden_layers < 1:
-            raise ValueError("num_hidden_layers must be >= 1")
-        self.mu_names = list(mu_names)
-        lows = [float(mu_bounds[name][0]) for name in self.mu_names]
-        highs = [float(mu_bounds[name][1]) for name in self.mu_names]
-        self.register_buffer("mu_low", torch.tensor(lows, dtype=torch.float32))
-        self.register_buffer("mu_high", torch.tensor(highs, dtype=torch.float32))
-        self.register_buffer("mu_mean", torch.tensor(mu_scaler.mean, dtype=torch.float32))
-        self.register_buffer("mu_std", torch.tensor(mu_scaler.std, dtype=torch.float32))
-
-        layers: List[nn.Module] = []
-        in_dim = obs_dim
-        for _ in range(num_hidden_layers):
-            layers.append(nn.Linear(in_dim, hidden_dim))
-            if use_layer_norm:
-                layers.append(nn.LayerNorm(hidden_dim))
-            layers.append(_make_local_activation(activation))
-            if dropout > 0.0:
-                layers.append(nn.Dropout(dropout))
-            in_dim = hidden_dim
-        layers.append(nn.Linear(hidden_dim, len(self.mu_names)))
-        self.net = nn.Sequential(*layers)
-        self.apply(self._init_weights)
-
-    @staticmethod
-    def _init_weights(module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
-            nn.init.xavier_uniform_(module.weight)
-            nn.init.zeros_(module.bias)
-
-    def forward_physical(self, x_scaled: torch.Tensor) -> torch.Tensor:
-        raw = self.net(x_scaled)
-        unit = torch.sigmoid(raw)
-        return self.mu_low + unit * (self.mu_high - self.mu_low)
-
-    def forward(self, x_scaled: torch.Tensor) -> torch.Tensor:
-        mu_phys = self.forward_physical(x_scaled)
-        return (mu_phys - self.mu_mean) / self.mu_std
-
-
-def _make_local_activation(name: str) -> nn.Module:
-    name = name.lower()
+def _make_activation(name: str) -> nn.Module:
+    name = str(name).lower()
     if name == "tanh":
         return nn.Tanh()
     if name == "gelu":
@@ -171,53 +112,113 @@ def _make_local_activation(name: str) -> nn.Module:
     raise ValueError(f"Unsupported activation: {name}")
 
 
-def get_mu_bounds_from_config(cfg: BMNConfig) -> Dict[str, Tuple[float, float]]:
-    return {
-        "Us": (float(cfg.ranges.Us_min), float(cfg.ranges.Us_max)),
-        "Ub": (float(cfg.ranges.Ub_min), float(cfg.ranges.Ub_max)),
-        "p": (float(cfg.ranges.p_min), float(cfg.ranges.p_max)),
-    }
+class BoundedMLPEncoder(nn.Module):
+    """Observation-to-parameter encoder with optional bounded outputs."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dim: int,
+        num_hidden_layers: int,
+        activation: str,
+        dropout: float,
+        use_layer_norm: bool,
+        lower_bounds: np.ndarray,
+        upper_bounds: np.ndarray,
+    ) -> None:
+        super().__init__()
+        if num_hidden_layers < 1:
+            raise ValueError("num_hidden_layers must be >= 1")
+        layers: List[nn.Module] = []
+        in_dim = input_dim
+        for _ in range(num_hidden_layers):
+            layers.append(nn.Linear(in_dim, hidden_dim))
+            if use_layer_norm:
+                layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(_make_activation(activation))
+            if dropout > 0.0:
+                layers.append(nn.Dropout(dropout))
+            in_dim = hidden_dim
+        self.backbone = nn.Sequential(*layers)
+        self.head = nn.Linear(in_dim, output_dim)
+        self.register_buffer("lower_bounds", torch.tensor(lower_bounds, dtype=torch.float32))
+        self.register_buffer("upper_bounds", torch.tensor(upper_bounds, dtype=torch.float32))
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.backbone(x)
+        logits = self.head(features)
+        span = self.upper_bounds - self.lower_bounds
+        return self.lower_bounds + span * torch.sigmoid(logits)
 
 
-def build_encoder_model(cfg: BMNConfig, obs_dim: int, mu_dim: int, mu_scaler: Optional[StandardScaler] = None) -> nn.Module:
+def _build_mu_bounds_scaled(cfg: BMNConfig, mu_scaler: StandardScaler) -> Tuple[np.ndarray, np.ndarray]:
+    lower_phys = np.asarray([cfg.ranges.Us_min, cfg.ranges.Ub_min, cfg.ranges.p_min], dtype=np.float32)
+    upper_phys = np.asarray([cfg.ranges.Us_max, cfg.ranges.Ub_max, cfg.ranges.p_max], dtype=np.float32)
+    lower_scaled = mu_scaler.transform(lower_phys[None, :])[0]
+    upper_scaled = mu_scaler.transform(upper_phys[None, :])[0]
+    return lower_scaled.astype(np.float32), upper_scaled.astype(np.float32)
+
+
+def build_encoder_model(
+    cfg: BMNConfig,
+    obs_dim: int,
+    mu_dim: int,
+    mu_scaler: StandardScaler,
+) -> nn.Module:
     arch = str(getattr(cfg.encoder_network, "architecture", "dense_mlp")).lower()
-    if arch in {"bounded_mlp", "pibae_mlp", "bounded"}:
-        if mu_scaler is None:
-            raise ValueError("mu_scaler is required for bounded_mlp Encoder.")
-        if mu_dim != len(MU_NAMES):
-            raise ValueError("bounded_mlp currently expects mu=[Us, Ub, p].")
-        return BoundedPIBAEEncoder(
-            obs_dim=obs_dim,
-            mu_names=MU_NAMES,
-            mu_bounds=get_mu_bounds_from_config(cfg),
-            mu_scaler=mu_scaler,
-            hidden_dim=cfg.encoder_network.hidden_dim,
-            num_hidden_layers=cfg.encoder_network.num_hidden_layers,
-            activation=cfg.encoder_network.activation,
-            dropout=cfg.encoder_network.dropout,
-            use_layer_norm=bool(getattr(cfg.encoder_network, "use_layer_norm", True)),
+    if arch == "dense_mlp":
+        return DenseMLP(
+            input_dim=obs_dim,
+            output_dim=mu_dim,
+            hidden_dim=int(cfg.encoder_network.hidden_dim),
+            num_hidden_layers=int(cfg.encoder_network.num_hidden_layers),
+            activation=str(cfg.encoder_network.activation),
+            dropout=float(cfg.encoder_network.dropout),
         )
-    return DenseMLP(
-        input_dim=obs_dim,
-        output_dim=mu_dim,
-        hidden_dim=cfg.encoder_network.hidden_dim,
-        num_hidden_layers=cfg.encoder_network.num_hidden_layers,
-        activation=cfg.encoder_network.activation,
-        dropout=cfg.encoder_network.dropout,
-    )
+    if arch == "bounded_mlp":
+        bounded_output = bool(getattr(cfg.encoder_network, "bounded_output", True))
+        if bounded_output:
+            lower_bounds, upper_bounds = _build_mu_bounds_scaled(cfg, mu_scaler)
+        else:
+            lower_bounds = np.full(mu_dim, -6.0, dtype=np.float32)
+            upper_bounds = np.full(mu_dim, 6.0, dtype=np.float32)
+        return BoundedMLPEncoder(
+            input_dim=obs_dim,
+            output_dim=mu_dim,
+            hidden_dim=int(cfg.encoder_network.hidden_dim),
+            num_hidden_layers=int(cfg.encoder_network.num_hidden_layers),
+            activation=str(cfg.encoder_network.activation),
+            dropout=float(cfg.encoder_network.dropout),
+            use_layer_norm=bool(getattr(cfg.encoder_network, "use_layer_norm", True)),
+            lower_bounds=lower_bounds,
+            upper_bounds=upper_bounds,
+        )
+    raise ValueError(f"Unsupported encoder architecture: {arch}")
+
+
+def _resolve_device(requested: str) -> str:
+    return requested if torch.cuda.is_available() or requested == "cpu" else "cpu"
 
 
 # =============================================================================
-# 2. Differentiable frozen Decoder adapter
+# 2. Frozen Decoder adapter
 # =============================================================================
 
 
 class FrozenDecoderAdapter(nn.Module):
-    """Torch adapter for frozen Decoder_DD checkpoint.
+    """Differentiable adapter for a frozen Decoder_DD checkpoint.
 
-    It receives physical-scale c and mu tensors and returns physical-scale y tensor.
-    The transformation through the Decoder remains differentiable with respect to mu,
-    so optional response losses can supervise the Encoder through the frozen Decoder.
+    Parameters are frozen, but the forward mapping remains differentiable with
+    respect to `mu`. Therefore L_obs can propagate gradients through the frozen
+    Decoder into the Encoder.
     """
 
     def __init__(self, decoder_checkpoint_path: str | Path, device: str) -> None:
@@ -241,15 +242,15 @@ class FrozenDecoderAdapter(nn.Module):
         Parameters
         ----------
         s  : (N,) physical arc-length coordinates.
-        c  : (B, 2) [Dx, ht].
-        mu : (B, 3) [Us, Ub, p].
+        c  : (B, 2), [Dx, ht].
+        mu : (B, 3), [Us, Ub, p].
 
         Returns
         -------
-        y  : (B, N, n_output) physical-scale response.
+        y : (B, N, n_output), physical-scale Decoder response.
         """
-        bsz = c.shape[0]
-        n_nodes = s.numel()
+        bsz = int(c.shape[0])
+        n_nodes = int(s.numel())
         params = torch.cat([c, mu], dim=1)  # [Dx, ht, Us, Ub, p]
         s_feat = s[None, :, None].repeat(bsz, 1, 1)
         p_feat = params[:, None, :].repeat(1, n_nodes, 1)
@@ -261,12 +262,21 @@ class FrozenDecoderAdapter(nn.Module):
 
 
 # =============================================================================
-# 3. Observation extraction from decoded fields
+# 3. Observation extraction and decoder-generated dataset
 # =============================================================================
 
 
-def extract_observation_torch(y: torch.Tensor, output_vars: List[str], observation_vars: List[str], sensor_indices: np.ndarray) -> torch.Tensor:
+def extract_observation_torch(
+    y: torch.Tensor,
+    output_vars: List[str],
+    observation_vars: List[str],
+    sensor_indices: np.ndarray,
+) -> torch.Tensor:
     var_to_col = {name: i for i, name in enumerate(output_vars)}
+    required = ["x", "z", *observation_vars]
+    missing = [name for name in required if name not in var_to_col]
+    if missing:
+        raise ValueError(f"Missing variables in Decoder output: {missing}; output_vars={output_vars}")
     obs_terms: List[torch.Tensor] = []
     obs_terms.append(y[:, -1, var_to_col["x"]])
     obs_terms.append(y[:, -1, var_to_col["z"]])
@@ -276,30 +286,163 @@ def extract_observation_torch(y: torch.Tensor, output_vars: List[str], observati
     return torch.stack(obs_terms, dim=1)
 
 
+def generate_cases_for_encoder(cfg: BMNConfig) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample admissible cases for Encoder training without calling the exact solver."""
+    rng = np.random.default_rng(int(cfg.dataset.seed) + 1009)
+    target_cases = get_encoder_n_cases(cfg)
+    params: List[List[float]] = []
+    while len(params) < target_cases:
+        case = sample_one_case(rng, cfg.ranges, cfg.physical)
+        params.append([case[name] for name in PARAM_NAMES])
+    params_arr = np.asarray(params, dtype=np.float32)
+    c_arr = params_arr[:, [PARAM_NAMES.index(name) for name in C_NAMES]].astype(np.float32)
+    mu_arr = params_arr[:, [PARAM_NAMES.index(name) for name in MU_NAMES]].astype(np.float32)
+    return params_arr, c_arr, mu_arr
+
+
+@torch.no_grad()
+def build_decoder_generated_encoder_dataset(
+    cfg: BMNConfig,
+    decoder_checkpoint_path: str | Path,
+    output_dir: Optional[str | Path] = None,
+) -> Path:
+    """Generate Encoder training data by the frozen Decoder.
+
+    Data-generation route:
+        sample (c, mu) -> y_D = D_phi*(c, mu) -> o_D = P(y_D)
+    """
+    output_dir = Path(output_dir) if output_dir is not None else Path(cfg.dataset.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = _resolve_device(str(cfg.encoder_training.device))
+    decoder_adapter = FrozenDecoderAdapter(decoder_checkpoint_path, device=device)
+    output_vars = list(decoder_adapter.output_vars)
+
+    params, c, mu = generate_cases_for_encoder(cfg)
+    s_np = np.linspace(0.0, float(cfg.physical.L), int(cfg.dataset.n_nodes), dtype=np.float32)
+    sensor_indices = resolve_sensor_indices(s_np, cfg.dataset)
+    s_t = torch.tensor(s_np, dtype=torch.float32, device=device)
+
+    y_chunks: List[np.ndarray] = []
+    obs_chunks: List[np.ndarray] = []
+    batch_size = max(1, int(cfg.encoder_training.batch_size))
+    t0 = time.time()
+
+    print("=" * 88)
+    print("Building Encoder dataset from frozen Decoder")
+    print(f"Decoder checkpoint: {decoder_checkpoint_path}")
+    print(f"Cases             : {len(mu)}")
+    print(f"Nodes/case        : {len(s_np)}")
+    print(f"Sensor indices    : {sensor_indices.tolist()}")
+    print(f"Observation vars  : {list(cfg.dataset.observation_vars)}")
+    print(f"Device            : {device}")
+    print("=" * 88)
+
+    for start in range(0, len(mu), batch_size):
+        end = min(start + batch_size, len(mu))
+        c_b = torch.tensor(c[start:end], dtype=torch.float32, device=device)
+        mu_b = torch.tensor(mu[start:end], dtype=torch.float32, device=device)
+        y_b = decoder_adapter(s_t, c_b, mu_b)
+        obs_b = extract_observation_torch(y_b, output_vars, list(cfg.dataset.observation_vars), sensor_indices)
+        y_chunks.append(y_b.detach().cpu().numpy().astype(np.float32))
+        obs_chunks.append(obs_b.detach().cpu().numpy().astype(np.float32))
+        if end == len(mu) or end % max(batch_size * 10, 1) == 0:
+            print(f"  generated {end:5d}/{len(mu)} | elapsed={time.time() - t0:.1f}s")
+
+    y = np.concatenate(y_chunks, axis=0).astype(np.float32)
+    obs = np.concatenate(obs_chunks, axis=0).astype(np.float32)
+    obs_names = ["x_top", "z_top"]
+    for idx in sensor_indices:
+        for var in cfg.dataset.observation_vars:
+            obs_names.append(f"{var}_idx{int(idx)}")
+
+    save_path = output_dir / cfg.dataset.encoder_dataset_filename
+    np.savez_compressed(
+        save_path,
+        observations=obs,
+        c=c,
+        mu=mu,
+        y=y,
+        params=params,
+        s=s_np,
+        sensor_indices=sensor_indices.astype(np.int64),
+        sensor_s=s_np[sensor_indices].astype(np.float32),
+        obs_names=np.asarray(obs_names),
+        output_vars=np.asarray(output_vars),
+        observation_vars=np.asarray(cfg.dataset.observation_vars),
+        param_names=np.asarray(PARAM_NAMES),
+        c_names=np.asarray(C_NAMES),
+        mu_names=np.asarray(MU_NAMES),
+        source="frozen_decoder",
+        decoder_checkpoint_path=str(decoder_checkpoint_path),
+        config_json=np.asarray(json.dumps(asdict(cfg), ensure_ascii=False)),
+    )
+    print("=" * 88)
+    print(f"Decoder-generated Encoder dataset saved: {save_path}")
+    print(f"Observations shape : {obs.shape}")
+    print(f"Full response shape: {y.shape}")
+    print("=" * 88)
+    return save_path
+
+
 # =============================================================================
 # 4. Training and evaluation
 # =============================================================================
 
 
-def evaluate_encoder(
+def evaluate_encoder_losses(
     encoder: nn.Module,
     loader: DataLoader,
     obs_scaler: StandardScaler,
     mu_scaler: StandardScaler,
+    decoder_adapter: FrozenDecoderAdapter,
+    s: torch.Tensor,
+    output_vars: List[str],
+    observation_vars: List[str],
+    sensor_indices: np.ndarray,
+    lambda_observation: float,
+    lambda_order: float,
     device: str,
-) -> float:
+) -> Dict[str, float]:
     encoder.eval()
-    mse = nn.MSELoss(reduction="sum")
-    total = 0.0
-    count = 0
+    mse_sum = nn.MSELoss(reduction="sum")
+    obs_mean = torch.tensor(obs_scaler.mean, dtype=torch.float32, device=device)
+    obs_std = torch.tensor(obs_scaler.std, dtype=torch.float32, device=device)
+    mu_mean = torch.tensor(mu_scaler.mean, dtype=torch.float32, device=device)
+    mu_std = torch.tensor(mu_scaler.std, dtype=torch.float32, device=device)
+    sum_mu = 0.0
+    sum_obs = 0.0
+    sum_order = 0.0
+    n_mu = 0
+    n_obs = 0
+    n_order = 0
     with torch.no_grad():
-        for obs_s, mu_s, _, _ in loader:
-            obs_s = obs_s.to(device)
-            mu_s = mu_s.to(device)
-            pred = encoder(obs_s)
-            total += float(mse(pred, mu_s).detach().cpu())
-            count += int(mu_s.numel())
-    return total / max(count, 1)
+        for obs_b_s, mu_b_s, c_b, _ in loader:
+            obs_b_s = obs_b_s.to(device)
+            mu_b_s = mu_b_s.to(device)
+            c_b = c_b.to(device)
+            pred_mu_s = encoder(obs_b_s)
+            sum_mu += float(mse_sum(pred_mu_s, mu_b_s).detach().cpu())
+            n_mu += int(mu_b_s.numel())
+            pred_mu_phys = pred_mu_s * mu_std + mu_mean
+            if lambda_observation > 0.0:
+                y_pred = decoder_adapter(s, c_b, pred_mu_phys)
+                obs_pred = extract_observation_torch(y_pred, output_vars, observation_vars, sensor_indices)
+                obs_pred_s = (obs_pred - obs_mean) / obs_std
+                sum_obs += float(mse_sum(obs_pred_s, obs_b_s).detach().cpu())
+                n_obs += int(obs_b_s.numel())
+            if lambda_order > 0.0:
+                order_violation = torch.relu(pred_mu_phys[:, 1] - pred_mu_phys[:, 0])
+                sum_order += float(torch.sum(order_violation**2).detach().cpu())
+                n_order += int(order_violation.numel())
+    mu_loss = sum_mu / max(n_mu, 1)
+    obs_loss = sum_obs / max(n_obs, 1) if lambda_observation > 0.0 else 0.0
+    order_loss = sum_order / max(n_order, 1) if lambda_order > 0.0 else 0.0
+    return {
+        "mu": mu_loss,
+        "observation": obs_loss,
+        "order": order_loss,
+        "total": mu_loss + float(lambda_observation) * obs_loss + float(lambda_order) * order_loss,
+    }
 
 
 def compute_test_metrics(
@@ -357,101 +500,147 @@ def train_encoder(
     observation_vars = [str(v) for v in dataset["observation_vars"].tolist()]
     sensor_indices = np.asarray(dataset["sensor_indices"], dtype=np.int64)
 
-    splits = split_indices(len(obs), cfg.dataset.train_fraction, cfg.dataset.val_fraction, cfg.encoder_training.seed)
+    splits = split_indices(len(obs), float(cfg.dataset.train_fraction), float(cfg.dataset.val_fraction), int(cfg.encoder_training.seed))
     obs_scaler = StandardScaler().fit(obs[splits["train"]])
     mu_scaler = StandardScaler().fit(mu[splits["train"]])
     obs_s = obs_scaler.transform(obs)
     mu_s = mu_scaler.transform(mu)
 
-    train_loader = make_loader(obs_s[splits["train"]], mu_s[splits["train"]], c[splits["train"]], y[splits["train"]], cfg.encoder_training.batch_size, True)
-    val_loader = make_loader(obs_s[splits["val"]], mu_s[splits["val"]], c[splits["val"]], y[splits["val"]], cfg.encoder_training.batch_size, False)
+    train_loader = make_loader(obs_s[splits["train"]], mu_s[splits["train"]], c[splits["train"]], y[splits["train"]], int(cfg.encoder_training.batch_size), True)
+    val_loader = make_loader(obs_s[splits["val"]], mu_s[splits["val"]], c[splits["val"]], y[splits["val"]], int(cfg.encoder_training.batch_size), False)
 
-    device = cfg.encoder_training.device if torch.cuda.is_available() or cfg.encoder_training.device == "cpu" else "cpu"
-    set_seed(cfg.encoder_training.seed)
+    device = _resolve_device(str(cfg.encoder_training.device))
+    set_seed(int(cfg.encoder_training.seed))
+    lambda_obs = float(getattr(cfg.encoder_training, "lambda_observation", 0.1))
+    if lambda_obs < 0.0:
+        lambda_obs = 0.0
+    lambda_order = float(getattr(cfg.encoder_training, "lambda_order", 0.0))
+    if lambda_order < 0.0:
+        lambda_order = 0.0
+
+    obs_mean = torch.tensor(obs_scaler.mean, dtype=torch.float32, device=device)
+    obs_std = torch.tensor(obs_scaler.std, dtype=torch.float32, device=device)
+    mu_mean = torch.tensor(mu_scaler.mean, dtype=torch.float32, device=device)
+    mu_std = torch.tensor(mu_scaler.std, dtype=torch.float32, device=device)
     encoder = build_encoder_model(cfg, obs_dim=obs.shape[1], mu_dim=mu.shape[1], mu_scaler=mu_scaler).to(device)
     decoder_adapter = FrozenDecoderAdapter(decoder_checkpoint_path, device=device)
     s = torch.tensor(s_np, dtype=torch.float32, device=device)
 
-    opt = optim.Adam(encoder.parameters(), lr=cfg.encoder_training.lr, weight_decay=cfg.encoder_training.weight_decay)
+    opt = optim.Adam(encoder.parameters(), lr=float(cfg.encoder_training.lr), weight_decay=float(cfg.encoder_training.weight_decay))
     mse = nn.MSELoss()
-    history: Dict[str, List[float]] = {"train_total": [], "train_mu": [], "train_response": [], "train_observation": [], "train_order": [], "val_mu": [], "lr": []}
+    history: Dict[str, List[float]] = {
+        "train_total": [],
+        "train_mu": [],
+        "train_observation": [],
+        "train_order": [],
+        "val_total": [],
+        "val_mu": [],
+        "val_observation": [],
+        "val_order": [],
+        "lr": [],
+    }
     best_val = float("inf")
     best_state = None
     no_improve = 0
     t0 = time.time()
 
-    y_scaler_dict = decoder_adapter.checkpoint["output_scaler"]
-    y_mean = torch.tensor(y_scaler_dict["mean"], dtype=torch.float32, device=device)
-    y_std = torch.tensor(y_scaler_dict["std"], dtype=torch.float32, device=device)
-    obs_mean = torch.tensor(obs_scaler.mean, dtype=torch.float32, device=device)
-    obs_std = torch.tensor(obs_scaler.std, dtype=torch.float32, device=device)
-
     print("=" * 88)
-    print("Training BMN_DD Encoder")
+    print("Training BMN_DD Encoder with frozen-Decoder observation consistency")
     print(f"Encoder data : {encoder_dataset_path}")
+    print(f"Data source  : {str(dataset.get('source', 'unknown'))}")
     print(f"Decoder ckpt : {decoder_checkpoint_path}")
     print(f"Train/Val/Test cases: {len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])}")
     print(f"Device       : {device}")
-    print(f"lambda_response={cfg.encoder_training.lambda_response}, lambda_observation={cfg.encoder_training.lambda_observation}, lambda_order={cfg.encoder_training.lambda_order}")
+    print(f"Architecture : {str(getattr(cfg.encoder_network, 'architecture', 'dense_mlp'))}")
+    print(f"Loss         : L = L_mu + {lambda_obs:g} * L_obs + {lambda_order:g} * L_order")
     print("=" * 88)
 
-    for epoch in range(1, cfg.encoder_training.epochs + 1):
+    for epoch in range(1, int(cfg.encoder_training.epochs) + 1):
         encoder.train()
-        sum_total = sum_mu = sum_resp = sum_obs = sum_order = 0.0
+        sum_total = 0.0
+        sum_mu = 0.0
+        sum_obs = 0.0
+        sum_order = 0.0
         n_batches = 0
-        for obs_b_s, mu_b_s, c_b, y_b in train_loader:
+        for obs_b_s, mu_b_s, c_b, _ in train_loader:
             obs_b_s = obs_b_s.to(device)
             mu_b_s = mu_b_s.to(device)
             c_b = c_b.to(device)
-            y_b = y_b.to(device)
             opt.zero_grad(set_to_none=True)
             pred_mu_s = encoder(obs_b_s)
             loss_mu = mse(pred_mu_s, mu_b_s)
-            loss_response = torch.tensor(0.0, device=device)
-            loss_observation = torch.tensor(0.0, device=device)
-            pred_mu_phys = pred_mu_s * torch.tensor(mu_scaler.std, dtype=torch.float32, device=device) + torch.tensor(mu_scaler.mean, dtype=torch.float32, device=device)
-            loss_order = torch.mean(torch.relu(pred_mu_phys[:, 1] - pred_mu_phys[:, 0]) ** 2)
-            if cfg.encoder_training.lambda_response > 0.0 or cfg.encoder_training.lambda_observation > 0.0:
+
+            pred_mu_phys = pred_mu_s * mu_std + mu_mean
+            if lambda_obs > 0.0:
                 y_pred = decoder_adapter(s, c_b, pred_mu_phys)
-                if cfg.encoder_training.lambda_response > 0.0:
-                    y_pred_s = (y_pred - y_mean) / y_std
-                    y_true_s = (y_b - y_mean) / y_std
-                    loss_response = mse(y_pred_s, y_true_s)
-                if cfg.encoder_training.lambda_observation > 0.0:
-                    obs_pred = extract_observation_torch(y_pred, output_vars, observation_vars, sensor_indices)
-                    obs_pred_s = (obs_pred - obs_mean) / obs_std
-                    loss_observation = mse(obs_pred_s, obs_b_s)
-            total = loss_mu + cfg.encoder_training.lambda_response * loss_response + cfg.encoder_training.lambda_observation * loss_observation + cfg.encoder_training.lambda_order * loss_order
+                obs_pred = extract_observation_torch(y_pred, output_vars, observation_vars, sensor_indices)
+                obs_pred_s = (obs_pred - obs_mean) / obs_std
+                loss_obs = mse(obs_pred_s, obs_b_s)
+            else:
+                loss_obs = torch.zeros((), dtype=torch.float32, device=device)
+            if lambda_order > 0.0:
+                order_violation = torch.relu(pred_mu_phys[:, 1] - pred_mu_phys[:, 0])
+                loss_order = torch.mean(order_violation**2)
+            else:
+                loss_order = torch.zeros((), dtype=torch.float32, device=device)
+
+            total = loss_mu + lambda_obs * loss_obs + lambda_order * loss_order
             total.backward()
             if cfg.encoder_training.grad_clip and cfg.encoder_training.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(encoder.parameters(), cfg.encoder_training.grad_clip)
+                torch.nn.utils.clip_grad_norm_(encoder.parameters(), float(cfg.encoder_training.grad_clip))
             opt.step()
+
             sum_total += float(total.detach().cpu())
             sum_mu += float(loss_mu.detach().cpu())
-            sum_resp += float(loss_response.detach().cpu())
-            sum_obs += float(loss_observation.detach().cpu())
+            sum_obs += float(loss_obs.detach().cpu())
             sum_order += float(loss_order.detach().cpu())
             n_batches += 1
 
-        val_mu = evaluate_encoder(encoder, val_loader, obs_scaler, mu_scaler, device)
-        history["train_total"].append(sum_total / max(n_batches, 1))
-        history["train_mu"].append(sum_mu / max(n_batches, 1))
-        history["train_response"].append(sum_resp / max(n_batches, 1))
-        history["train_observation"].append(sum_obs / max(n_batches, 1))
-        history["train_order"].append(sum_order / max(n_batches, 1))
-        history["val_mu"].append(val_mu)
+        val_losses = evaluate_encoder_losses(
+            encoder=encoder,
+            loader=val_loader,
+            obs_scaler=obs_scaler,
+            mu_scaler=mu_scaler,
+            decoder_adapter=decoder_adapter,
+            s=s,
+            output_vars=output_vars,
+            observation_vars=observation_vars,
+            sensor_indices=sensor_indices,
+            lambda_observation=lambda_obs,
+            lambda_order=lambda_order,
+            device=device,
+        )
+        train_total = sum_total / max(n_batches, 1)
+        train_mu = sum_mu / max(n_batches, 1)
+        train_obs = sum_obs / max(n_batches, 1)
+        train_order = sum_order / max(n_batches, 1)
+        history["train_total"].append(train_total)
+        history["train_mu"].append(train_mu)
+        history["train_observation"].append(train_obs)
+        history["train_order"].append(train_order)
+        history["val_total"].append(float(val_losses["total"]))
+        history["val_mu"].append(float(val_losses["mu"]))
+        history["val_observation"].append(float(val_losses["observation"]))
+        history["val_order"].append(float(val_losses["order"]))
         history["lr"].append(float(opt.param_groups[0]["lr"]))
 
-        if val_mu < best_val:
-            best_val = val_mu
+        if val_losses["total"] < best_val:
+            best_val = float(val_losses["total"])
             best_state = {k: v.detach().cpu().clone() for k, v in encoder.state_dict().items()}
             no_improve = 0
         else:
             no_improve += 1
-        if epoch == 1 or epoch % cfg.encoder_training.print_every == 0:
-            print(f"[Encoder] epoch={epoch:5d} | total={history['train_total'][-1]:.3e} | mu={history['train_mu'][-1]:.3e} | val_mu={val_mu:.3e} | best={best_val:.3e} | elapsed={time.time()-t0:.1f}s")
-        if cfg.encoder_training.patience > 0 and no_improve >= cfg.encoder_training.patience:
-            print(f"[Encoder] early stopping at epoch {epoch}; best val_mu={best_val:.3e}")
+
+        if epoch == 1 or epoch % int(cfg.encoder_training.print_every) == 0:
+            print(
+                f"[Encoder] epoch={epoch:5d} | total={train_total:.3e} | mu={train_mu:.3e} | "
+                f"obs={train_obs:.3e} | order={train_order:.3e} | val_total={val_losses['total']:.3e} | "
+                f"val_mu={val_losses['mu']:.3e} | val_obs={val_losses['observation']:.3e} | "
+                f"val_order={val_losses['order']:.3e} | "
+                f"best={best_val:.3e} | elapsed={time.time() - t0:.1f}s"
+            )
+        if cfg.encoder_training.patience > 0 and no_improve >= int(cfg.encoder_training.patience):
+            print(f"[Encoder] early stopping at epoch {epoch}; best val_total={best_val:.3e}")
             break
 
     if best_state is not None:
@@ -459,7 +648,9 @@ def train_encoder(
     metrics = compute_test_metrics(encoder, dataset, splits["test"], obs_scaler, mu_scaler, decoder_adapter, device) if len(splits["test"]) > 0 else {}
     ckpt_path = output_dir / cfg.encoder_training.model_filename
     checkpoint = {
-        "version": "BMN-SCR-DD v0.2 Encoder",
+        "version": "BMN-SCR-DD v0.3 Encoder",
+        "training_scheme": "frozen_decoder_guided: L_mu + lambda_observation * L_obs",
+        "lambda_observation": lambda_obs,
         "model_state_dict": encoder.state_dict(),
         "config": asdict(cfg),
         "obs_scaler": obs_scaler.to_dict(),
@@ -474,9 +665,8 @@ def train_encoder(
         "decoder_checkpoint_path": str(decoder_checkpoint_path),
         "encoder_dataset_path": str(encoder_dataset_path),
         "splits": {k: v.tolist() for k, v in splits.items()},
-        "best_val_mu_loss": best_val,
+        "best_val_total_loss": best_val,
         "test_metrics": metrics,
-        "encoder_architecture": str(getattr(cfg.encoder_network, "architecture", "dense_mlp")),
     }
     torch.save(checkpoint, ckpt_path)
     with open(output_dir / cfg.encoder_training.history_filename, "w", encoding="utf-8") as f:
@@ -497,17 +687,26 @@ def train_encoder(
 
 def load_encoder_model(encoder_checkpoint_path: str | Path, map_location: str | torch.device = "cpu") -> Tuple[nn.Module, Dict[str, Any]]:
     ckpt = torch.load(encoder_checkpoint_path, map_location=map_location)
-    cfg = config_from_dict(ckpt["config"])
-    # Backward compatibility: v0.1 checkpoints did not store an architecture flag and
-    # used the unconstrained DenseMLP. v0.2 checkpoints store and use bounded_mlp.
-    raw_net_cfg = ckpt.get("config", {}).get("encoder_network", {})
-    if "architecture" not in raw_net_cfg and "encoder_architecture" not in ckpt:
-        cfg.encoder_network.architecture = "dense_mlp"
-    elif "encoder_architecture" in ckpt:
-        cfg.encoder_network.architecture = str(ckpt["encoder_architecture"])
+    cfg = BMNConfig()
+    cfg = cfg if "config" not in ckpt else cfg
+    if "config" in ckpt:
+        cfg_json = ckpt["config"]
+        cfg.encoder_network.architecture = str(cfg_json["encoder_network"].get("architecture", cfg.encoder_network.architecture))
+        cfg.encoder_network.hidden_dim = int(cfg_json["encoder_network"]["hidden_dim"])
+        cfg.encoder_network.num_hidden_layers = int(cfg_json["encoder_network"]["num_hidden_layers"])
+        cfg.encoder_network.activation = str(cfg_json["encoder_network"]["activation"])
+        cfg.encoder_network.dropout = float(cfg_json["encoder_network"].get("dropout", cfg.encoder_network.dropout))
+        cfg.encoder_network.use_layer_norm = bool(cfg_json["encoder_network"].get("use_layer_norm", cfg.encoder_network.use_layer_norm))
+        cfg.encoder_network.bounded_output = bool(cfg_json["encoder_network"].get("bounded_output", cfg.encoder_network.bounded_output))
+        cfg.ranges.Us_min = float(cfg_json["ranges"].get("Us_min", cfg.ranges.Us_min))
+        cfg.ranges.Us_max = float(cfg_json["ranges"].get("Us_max", cfg.ranges.Us_max))
+        cfg.ranges.Ub_min = float(cfg_json["ranges"].get("Ub_min", cfg.ranges.Ub_min))
+        cfg.ranges.Ub_max = float(cfg_json["ranges"].get("Ub_max", cfg.ranges.Ub_max))
+        cfg.ranges.p_min = float(cfg_json["ranges"].get("p_min", cfg.ranges.p_min))
+        cfg.ranges.p_max = float(cfg_json["ranges"].get("p_max", cfg.ranges.p_max))
     mu_scaler = StandardScaler.from_dict(ckpt["mu_scaler"])
     model = build_encoder_model(
-        cfg,
+        cfg=cfg,
         obs_dim=len(ckpt["obs_names"]),
         mu_dim=len(ckpt["mu_names"]),
         mu_scaler=mu_scaler,
@@ -545,7 +744,7 @@ def predict_from_observation(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="BMN-SCR-DD v0.2 Encoder training and inference")
+    parser = argparse.ArgumentParser(description="BMN-SCR-DD v0.3 frozen-Decoder-guided Encoder training")
     parser.add_argument("--config", type=str, default="para_config.json", help="Path to para_config.json")
     parser.add_argument("--encoder_data", type=str, default=None, help="Path to bmn_encoder_dataset.npz")
     parser.add_argument("--decoder_ckpt", type=str, default=None, help="Path to Decoder_DD_model.pth")
@@ -559,12 +758,18 @@ def main() -> None:
     encoder_data = Path(args.encoder_data) if args.encoder_data is not None else output_dir / cfg.dataset.encoder_dataset_filename
 
     if args.mode in {"build_data", "all"}:
-        encoder_data = build_encoder_dataset(cfg, output_dir / cfg.dataset.full_dataset_filename)
+        if not decoder_ckpt.exists():
+            raise FileNotFoundError(f"Decoder checkpoint not found: {decoder_ckpt}. Train Decoder first or pass --decoder_ckpt.")
+        encoder_data = build_decoder_generated_encoder_dataset(cfg, decoder_ckpt, output_dir=output_dir)
+
     if args.mode in {"train", "all"}:
         if not encoder_data.exists():
-            raise FileNotFoundError(f"Encoder dataset not found: {encoder_data}. Run Decoder_DD.py --mode extract_encoder_data first.")
+            raise FileNotFoundError(
+                f"Encoder dataset not found: {encoder_data}. Run `python BMN_DD.py --mode build_data` first, "
+                "or pass --encoder_data."
+            )
         if not decoder_ckpt.exists():
-            raise FileNotFoundError(f"Decoder checkpoint not found: {decoder_ckpt}. Run Decoder_DD.py --mode train_decoder first.")
+            raise FileNotFoundError(f"Decoder checkpoint not found: {decoder_ckpt}. Train Decoder first or pass --decoder_ckpt.")
         train_encoder(cfg, encoder_data, decoder_ckpt, output_dir=output_dir)
 
 

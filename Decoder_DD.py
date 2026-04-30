@@ -145,7 +145,10 @@ class ExactSolverOptions:
 
 @dataclass
 class DatasetConfig:
+    # Legacy shared case count kept for backward compatibility with old configs.
     n_cases: int = 200
+    decoder_n_cases: int = 200
+    encoder_n_cases: int = 200
     n_nodes: int = 256
     seed: int = 42
     max_sample_attempts: int = 50000
@@ -233,6 +236,16 @@ class BMNConfig:
     decoder_training: DecoderTrainingConfig = field(default_factory=DecoderTrainingConfig)
     encoder_network: EncoderNetworkConfig = field(default_factory=EncoderNetworkConfig)
     encoder_training: EncoderTrainingConfig = field(default_factory=EncoderTrainingConfig)
+
+
+def get_decoder_n_cases(cfg: BMNConfig) -> int:
+    value = int(getattr(cfg.dataset, "decoder_n_cases", 0))
+    return value if value > 0 else int(cfg.dataset.n_cases)
+
+
+def get_encoder_n_cases(cfg: BMNConfig) -> int:
+    value = int(getattr(cfg.dataset, "encoder_n_cases", 0))
+    return value if value > 0 else int(cfg.dataset.n_cases)
 
 
 # =============================================================================
@@ -468,6 +481,7 @@ def generate_decoder_dataset(cfg: BMNConfig) -> Path:
     out_dir = ensure_dir(cfg.dataset.output_dir)
     save_path = out_dir / cfg.dataset.full_dataset_filename
     rng = np.random.default_rng(cfg.dataset.seed)
+    target_cases = get_decoder_n_cases(cfg)
     params: List[List[float]] = []
     raw_fields: Dict[str, List[np.ndarray]] = {key: [] for key in ALL_RESPONSE_VARS}
     info_json: List[str] = []
@@ -478,12 +492,12 @@ def generate_decoder_dataset(cfg: BMNConfig) -> Path:
 
     print("=" * 88)
     print("Generating exact-solver dataset for Decoder_DD")
-    print(f"Target cases : {cfg.dataset.n_cases}")
+    print(f"Target cases : {target_cases}")
     print(f"Nodes/case   : {cfg.dataset.n_nodes}")
     print(f"Output       : {save_path}")
     print("=" * 88)
 
-    while len(params) < cfg.dataset.n_cases:
+    while len(params) < target_cases:
         attempts += 1
         if attempts > cfg.dataset.max_sample_attempts:
             raise RuntimeError(f"Only collected {len(params)} valid exact cases within {attempts} attempts.")
@@ -502,8 +516,8 @@ def generate_decoder_dataset(cfg: BMNConfig) -> Path:
         for key in ALL_RESPONSE_VARS:
             raw_fields[key].append(exact[key])
         info_json.append(exact.get("info_json", "{}"))
-        if len(params) == 1 or len(params) % max(1, cfg.dataset.n_cases // 10) == 0:
-            print(f"  collected {len(params):5d}/{cfg.dataset.n_cases} | attempts={attempts} | elapsed={time.time()-t0:.1f}s")
+        if len(params) == 1 or len(params) % max(1, target_cases // 10) == 0:
+            print(f"  collected {len(params):5d}/{target_cases} | attempts={attempts} | elapsed={time.time()-t0:.1f}s")
 
     assert s_grid is not None
     params_arr = np.asarray(params, dtype=np.float32)
