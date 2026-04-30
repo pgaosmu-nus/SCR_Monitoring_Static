@@ -23,7 +23,7 @@
   },
   "dataset": {
     "n_cases": 200,
-    "decoder_n_cases": 200,
+    "decoder_n_cases": 2000,
     "encoder_n_cases": 20000,
     "n_nodes": 256,
     "seed": 42,

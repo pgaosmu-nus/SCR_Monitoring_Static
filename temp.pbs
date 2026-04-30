@@ -1,0 +1,42 @@
+#!/bin/bash
+# 1. ������ҵ����
+#PBS -N Decoder_DD_Test
+# �ؼ�������֮ǰ�� qstat -q����ȷ�� auto_free ����Ч���У�������� Unknown Queue�����Ϊ gpu
+#PBS -q auto_free
+# ��Դ���룺�������趨�� 6��/50GB ����
+#PBS -l select=1:ncpus=6:mpiprocs=1:ompthreads=6:mem=50gb:ngpus=1
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+# 2. ���׽�� UnicodeEncodeError (�����޸�)
+# ��ִ���κ� python ����ǰ��ǿ���趨��������Ϊ UTF-8
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+export PYTHONIOENCODING=utf-8
+
+# 3. ���빤��Ŀ¼
+cd $PBS_O_WORKDIR
+
+# 4. ��������
+module purge
+module load Python/3.11.3-GCCcore-12.3.0
+module load CUDA/12.1.1 
+
+# ������������
+unset PYTHONHOME
+unset PYTHONPATH
+
+# 5. �����������
+echo "========== ���л������ =========="
+echo "����ʼʱ��: $(date)"
+echo "��ǰ Python ·��: $(which python)"
+# �������Ƿ���Ч
+python -c "import sys; print('defualt code:', sys.getdefaultencoding())"
+python --version
+# ��֤ PyTorch (sm_86 ������)
+python -c "import torch; print('PyTorch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available()); print('GPU Spec:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+echo "=================================="
+
+# 6. ִ���о�����
+# ʹ�� -u ȷ�����ʵʱд����־
+python -u Decoder_DD.py

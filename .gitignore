@@ -4,6 +4,9 @@ outputs/
 #VS code workspace settings
 *.code-workspace
 
+#Vanda logs
+*.o*
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
