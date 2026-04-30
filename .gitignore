@@ -1,6 +1,7 @@
 #Output folders
 BMN_SCR_DD_outputs/
 decoder_test_exact_comparison/
+bmn_random_exact_comparison/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

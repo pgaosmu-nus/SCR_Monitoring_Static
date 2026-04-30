@@ -69,6 +69,20 @@ def load_npz_dataset(path: str | Path) -> Dict[str, Any]:
     return {key: npz[key] for key in npz.files}
 
 
+def validate_encoder_dataset_size(path: str | Path, expected_n_cases: int) -> None:
+    dataset = load_npz_dataset(path)
+    if "observations" not in dataset:
+        raise KeyError(f"Encoder dataset is missing required key 'observations': {path}")
+    actual_n_cases = int(np.asarray(dataset["observations"]).shape[0])
+    if actual_n_cases != int(expected_n_cases):
+        raise ValueError(
+            "Encoder dataset size mismatch: "
+            f"{path} contains {actual_n_cases} cases, but config expects {int(expected_n_cases)} cases. "
+            "Run `python BMN_DD.py --mode build_data` (or `--mode all`) to regenerate the dataset, "
+            "or pass the correct dataset path via --encoder_data."
+        )
+
+
 def split_indices(n: int, train_fraction: float, val_fraction: float, seed: int) -> Dict[str, np.ndarray]:
     rng = np.random.default_rng(seed)
     idx = np.arange(n)
@@ -768,6 +782,7 @@ def main() -> None:
                 f"Encoder dataset not found: {encoder_data}. Run `python BMN_DD.py --mode build_data` first, "
                 "or pass --encoder_data."
             )
+        validate_encoder_dataset_size(encoder_data, get_encoder_n_cases(cfg))
         if not decoder_ckpt.exists():
             raise FileNotFoundError(f"Decoder checkpoint not found: {decoder_ckpt}. Train Decoder first or pass --decoder_ckpt.")
         train_encoder(cfg, encoder_data, decoder_ckpt, output_dir=output_dir)
