@@ -1,5 +1,6 @@
 # Output folders
 outputs/
+paper_outputs/
 
 #VS code workspace settings
 *.code-workspace

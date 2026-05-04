@@ -34,7 +34,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -413,6 +413,9 @@ def evaluate_encoder_losses(
     output_vars: List[str],
     observation_vars: List[str],
     sensor_indices: np.ndarray,
+    response_var_indices: Sequence[int],
+    response_var_scales: torch.Tensor,
+    lambda_response: float,
     lambda_observation: float,
     lambda_order: float,
     device: str,
@@ -425,38 +428,81 @@ def evaluate_encoder_losses(
     mu_std = torch.tensor(mu_scaler.std, dtype=torch.float32, device=device)
     sum_mu = 0.0
     sum_obs = 0.0
+    sum_response = 0.0
     sum_order = 0.0
     n_mu = 0
     n_obs = 0
+    n_response = 0
     n_order = 0
     with torch.no_grad():
-        for obs_b_s, mu_b_s, c_b, _ in loader:
+        for obs_b_s, mu_b_s, c_b, y_b in loader:
             obs_b_s = obs_b_s.to(device)
             mu_b_s = mu_b_s.to(device)
             c_b = c_b.to(device)
+            y_b = y_b.to(device)
             pred_mu_s = encoder(obs_b_s)
             sum_mu += float(mse_sum(pred_mu_s, mu_b_s).detach().cpu())
             n_mu += int(mu_b_s.numel())
             pred_mu_phys = pred_mu_s * mu_std + mu_mean
-            if lambda_observation > 0.0:
+            if lambda_observation > 0.0 or (lambda_response > 0.0 and len(response_var_indices) > 0):
                 y_pred = decoder_adapter(s, c_b, pred_mu_phys)
+            if lambda_observation > 0.0:
                 obs_pred = extract_observation_torch(y_pred, output_vars, observation_vars, sensor_indices)
                 obs_pred_s = (obs_pred - obs_mean) / obs_std
                 sum_obs += float(mse_sum(obs_pred_s, obs_b_s).detach().cpu())
                 n_obs += int(obs_b_s.numel())
+            if lambda_response > 0.0 and len(response_var_indices) > 0:
+                y_pred_sel = y_pred[:, :, list(response_var_indices)]
+                y_true_sel = y_b[:, :, list(response_var_indices)]
+                diff_s = (y_pred_sel - y_true_sel) / response_var_scales.view(1, 1, -1)
+                sum_response += float(torch.sum(diff_s**2).detach().cpu())
+                n_response += int(diff_s.numel())
             if lambda_order > 0.0:
                 order_violation = torch.relu(pred_mu_phys[:, 1] - pred_mu_phys[:, 0])
                 sum_order += float(torch.sum(order_violation**2).detach().cpu())
                 n_order += int(order_violation.numel())
     mu_loss = sum_mu / max(n_mu, 1)
     obs_loss = sum_obs / max(n_obs, 1) if lambda_observation > 0.0 else 0.0
+    response_loss = sum_response / max(n_response, 1) if lambda_response > 0.0 and len(response_var_indices) > 0 else 0.0
     order_loss = sum_order / max(n_order, 1) if lambda_order > 0.0 else 0.0
     return {
         "mu": mu_loss,
         "observation": obs_loss,
+        "response": response_loss,
         "order": order_loss,
-        "total": mu_loss + float(lambda_observation) * obs_loss + float(lambda_order) * order_loss,
+        "total": mu_loss + float(lambda_response) * response_loss + float(lambda_observation) * obs_loss + float(lambda_order) * order_loss,
     }
+
+
+def _resolve_response_var_indices(output_vars: Sequence[str], requested_vars: Sequence[str]) -> List[int]:
+    var_to_idx = {name: i for i, name in enumerate(output_vars)}
+    indices: List[int] = []
+    for name in requested_vars:
+        if name not in var_to_idx:
+            raise ValueError(f"Response loss variable {name!r} is absent from output_vars={list(output_vars)}")
+        indices.append(var_to_idx[name])
+    return indices
+
+
+def _build_response_var_scales(
+    y_train: np.ndarray,
+    response_var_indices: Sequence[int],
+    scale_floor: float,
+    device: str,
+) -> torch.Tensor:
+    if len(response_var_indices) == 0:
+        return torch.empty(0, dtype=torch.float32, device=device)
+    scales = np.std(y_train[:, :, list(response_var_indices)], axis=(0, 1)).astype(np.float32)
+    scales = np.maximum(scales, float(scale_floor))
+    return torch.tensor(scales, dtype=torch.float32, device=device)
+
+
+def _grad_norm(loss: torch.Tensor, params: Sequence[torch.nn.Parameter]) -> torch.Tensor:
+    grads = torch.autograd.grad(loss, params, retain_graph=True, allow_unused=True)
+    norms = [torch.sum(g.detach() ** 2) for g in grads if g is not None]
+    if not norms:
+        return torch.zeros((), dtype=loss.dtype, device=loss.device)
+    return torch.sqrt(torch.stack(norms).sum())
 
 
 def compute_test_metrics(
@@ -528,9 +574,33 @@ def train_encoder(
     lambda_obs = float(getattr(cfg.encoder_training, "lambda_observation", 0.1))
     if lambda_obs < 0.0:
         lambda_obs = 0.0
+    lambda_resp = float(getattr(cfg.encoder_training, "lambda_response", 0.0))
+    if lambda_resp < 0.0:
+        lambda_resp = 0.0
     lambda_order = float(getattr(cfg.encoder_training, "lambda_order", 0.0))
     if lambda_order < 0.0:
         lambda_order = 0.0
+    response_stage2_start_epoch = max(1, int(getattr(cfg.encoder_training, "response_stage2_start_epoch", 1)))
+    response_var_indices = _resolve_response_var_indices(
+        output_vars,
+        list(getattr(cfg.encoder_training, "response_loss_vars", ["theta", "T", "M"])),
+    ) if lambda_resp > 0.0 else []
+    response_var_scales = _build_response_var_scales(
+        y[splits["train"]],
+        response_var_indices,
+        float(getattr(cfg.encoder_training, "response_scale_floor", 1.0e-6)),
+        device,
+    )
+    response_grad_target_ratio = max(0.0, float(getattr(cfg.encoder_training, "response_grad_target_ratio", 0.2)))
+    response_lambda_ema = float(getattr(cfg.encoder_training, "response_lambda_ema", 0.9))
+    response_lambda_ema = min(max(response_lambda_ema, 0.0), 0.9999)
+    response_lambda_min = max(0.0, float(getattr(cfg.encoder_training, "response_lambda_min", 1.0e-4)))
+    response_lambda_max = max(response_lambda_min, float(getattr(cfg.encoder_training, "response_lambda_max", 10.0)))
+    response_bound_growth = max(1.1, float(getattr(cfg.encoder_training, "response_bound_growth", 2.0)))
+    response_bound_saturation_steps = max(1, int(getattr(cfg.encoder_training, "response_bound_saturation_steps", 100)))
+    lambda_resp_dynamic = response_lambda_min if lambda_resp > 0.0 else 0.0
+    resp_sat_max_steps = 0
+    resp_sat_min_steps = 0
 
     obs_mean = torch.tensor(obs_scaler.mean, dtype=torch.float32, device=device)
     obs_std = torch.tensor(obs_scaler.std, dtype=torch.float32, device=device)
@@ -545,15 +615,20 @@ def train_encoder(
     history: Dict[str, List[float]] = {
         "train_total": [],
         "train_mu": [],
+        "train_response": [],
         "train_observation": [],
         "train_order": [],
         "val_total": [],
         "val_mu": [],
+        "val_response": [],
         "val_observation": [],
         "val_order": [],
+        "lambda_response": [],
+        "lambda_response_min": [],
+        "lambda_response_max": [],
         "lr": [],
     }
-    best_val = float("inf")
+    best_train_total = float("inf")
     best_state = None
     no_improve = 0
     t0 = time.time()
@@ -566,27 +641,68 @@ def train_encoder(
     print(f"Train/Val/Test cases: {len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])}")
     print(f"Device       : {device}")
     print(f"Architecture : {str(getattr(cfg.encoder_network, 'architecture', 'dense_mlp'))}")
-    print(f"Loss         : L = L_mu + {lambda_obs:g} * L_obs + {lambda_order:g} * L_order")
+    print(f"Loss         : L = L_mu + lambda_resp * L_resp + {lambda_obs:g} * L_obs + {lambda_order:g} * L_order")
+    if lambda_resp > 0.0:
+        print(f"Response vars : {[output_vars[i] for i in response_var_indices]}")
+        print(f"Stage-2 epoch : {response_stage2_start_epoch}")
+        print(f"Resp lambda   : min={response_lambda_min:g}, max={response_lambda_max:g}, target_grad_ratio={response_grad_target_ratio:g}")
     print("=" * 88)
+
+    encoder_params = [p for p in encoder.parameters() if p.requires_grad]
 
     for epoch in range(1, int(cfg.encoder_training.epochs) + 1):
         encoder.train()
         sum_total = 0.0
         sum_mu = 0.0
+        sum_response = 0.0
         sum_obs = 0.0
         sum_order = 0.0
         n_batches = 0
-        for obs_b_s, mu_b_s, c_b, _ in train_loader:
+        lambda_resp_epoch = 0.0
+        for obs_b_s, mu_b_s, c_b, y_b in train_loader:
             obs_b_s = obs_b_s.to(device)
             mu_b_s = mu_b_s.to(device)
             c_b = c_b.to(device)
+            y_b = y_b.to(device)
             opt.zero_grad(set_to_none=True)
             pred_mu_s = encoder(obs_b_s)
             loss_mu = mse(pred_mu_s, mu_b_s)
 
             pred_mu_phys = pred_mu_s * mu_std + mu_mean
+            y_pred = decoder_adapter(s, c_b, pred_mu_phys)
+            if lambda_resp > 0.0 and epoch >= response_stage2_start_epoch and len(response_var_indices) > 0:
+                y_pred_sel = y_pred[:, :, response_var_indices]
+                y_true_sel = y_b[:, :, response_var_indices]
+                diff_s = (y_pred_sel - y_true_sel) / response_var_scales.view(1, 1, -1)
+                loss_resp = torch.mean(diff_s**2)
+                grad_mu = _grad_norm(loss_mu, encoder_params)
+                grad_resp = _grad_norm(loss_resp, encoder_params)
+                if float(grad_resp.detach().cpu()) > 0.0:
+                    candidate = response_grad_target_ratio * float((grad_mu / (grad_resp + 1.0e-12)).detach().cpu())
+                else:
+                    candidate = response_lambda_max
+                lambda_resp_dynamic = response_lambda_ema * lambda_resp_dynamic + (1.0 - response_lambda_ema) * candidate
+                if lambda_resp_dynamic >= response_lambda_max:
+                    resp_sat_max_steps += 1
+                    resp_sat_min_steps = 0
+                elif lambda_resp_dynamic <= response_lambda_min:
+                    resp_sat_min_steps += 1
+                    resp_sat_max_steps = 0
+                else:
+                    resp_sat_max_steps = 0
+                    resp_sat_min_steps = 0
+                if resp_sat_max_steps >= response_bound_saturation_steps:
+                    response_lambda_max *= response_bound_growth
+                    resp_sat_max_steps = 0
+                if resp_sat_min_steps >= response_bound_saturation_steps:
+                    response_lambda_min /= response_bound_growth
+                    resp_sat_min_steps = 0
+                response_lambda_max = max(response_lambda_max, response_lambda_min)
+                lambda_resp_batch = min(max(lambda_resp_dynamic, response_lambda_min), response_lambda_max)
+            else:
+                loss_resp = torch.zeros((), dtype=torch.float32, device=device)
+                lambda_resp_batch = 0.0
             if lambda_obs > 0.0:
-                y_pred = decoder_adapter(s, c_b, pred_mu_phys)
                 obs_pred = extract_observation_torch(y_pred, output_vars, observation_vars, sensor_indices)
                 obs_pred_s = (obs_pred - obs_mean) / obs_std
                 loss_obs = mse(obs_pred_s, obs_b_s)
@@ -598,7 +714,7 @@ def train_encoder(
             else:
                 loss_order = torch.zeros((), dtype=torch.float32, device=device)
 
-            total = loss_mu + lambda_obs * loss_obs + lambda_order * loss_order
+            total = loss_mu + lambda_resp_batch * loss_resp + lambda_obs * loss_obs + lambda_order * loss_order
             total.backward()
             if cfg.encoder_training.grad_clip and cfg.encoder_training.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(encoder.parameters(), float(cfg.encoder_training.grad_clip))
@@ -606,8 +722,10 @@ def train_encoder(
 
             sum_total += float(total.detach().cpu())
             sum_mu += float(loss_mu.detach().cpu())
+            sum_response += float(loss_resp.detach().cpu())
             sum_obs += float(loss_obs.detach().cpu())
             sum_order += float(loss_order.detach().cpu())
+            lambda_resp_epoch += float(lambda_resp_batch)
             n_batches += 1
 
         val_losses = evaluate_encoder_losses(
@@ -620,26 +738,36 @@ def train_encoder(
             output_vars=output_vars,
             observation_vars=observation_vars,
             sensor_indices=sensor_indices,
+            response_var_indices=response_var_indices,
+            response_var_scales=response_var_scales,
+            lambda_response=(lambda_resp_epoch / max(n_batches, 1)),
             lambda_observation=lambda_obs,
             lambda_order=lambda_order,
             device=device,
         )
         train_total = sum_total / max(n_batches, 1)
         train_mu = sum_mu / max(n_batches, 1)
+        train_response = sum_response / max(n_batches, 1)
         train_obs = sum_obs / max(n_batches, 1)
         train_order = sum_order / max(n_batches, 1)
+        lambda_resp_epoch = lambda_resp_epoch / max(n_batches, 1)
         history["train_total"].append(train_total)
         history["train_mu"].append(train_mu)
+        history["train_response"].append(train_response)
         history["train_observation"].append(train_obs)
         history["train_order"].append(train_order)
         history["val_total"].append(float(val_losses["total"]))
         history["val_mu"].append(float(val_losses["mu"]))
+        history["val_response"].append(float(val_losses["response"]))
         history["val_observation"].append(float(val_losses["observation"]))
         history["val_order"].append(float(val_losses["order"]))
+        history["lambda_response"].append(float(lambda_resp_epoch))
+        history["lambda_response_min"].append(float(response_lambda_min))
+        history["lambda_response_max"].append(float(response_lambda_max))
         history["lr"].append(float(opt.param_groups[0]["lr"]))
 
-        if val_losses["total"] < best_val:
-            best_val = float(val_losses["total"])
+        if train_total < best_train_total:
+            best_train_total = float(train_total)
             best_state = {k: v.detach().cpu().clone() for k, v in encoder.state_dict().items()}
             no_improve = 0
         else:
@@ -648,13 +776,15 @@ def train_encoder(
         if epoch == 1 or epoch % int(cfg.encoder_training.print_every) == 0:
             print(
                 f"[Encoder] epoch={epoch:5d} | total={train_total:.3e} | mu={train_mu:.3e} | "
-                f"obs={train_obs:.3e} | order={train_order:.3e} | val_total={val_losses['total']:.3e} | "
+                f"resp={train_response:.3e} | obs={train_obs:.3e} | order={train_order:.3e} | "
+                f"val_total={val_losses['total']:.3e} | "
                 f"val_mu={val_losses['mu']:.3e} | val_obs={val_losses['observation']:.3e} | "
-                f"val_order={val_losses['order']:.3e} | "
-                f"best={best_val:.3e} | elapsed={time.time() - t0:.1f}s"
+                f"val_resp={val_losses['response']:.3e} | val_order={val_losses['order']:.3e} | "
+                f"lambda_resp={lambda_resp_epoch:.3e} [{response_lambda_min:.1e}, {response_lambda_max:.1e}] | "
+                f"best_train_total={best_train_total:.3e} | elapsed={time.time() - t0:.1f}s"
             )
         if cfg.encoder_training.patience > 0 and no_improve >= int(cfg.encoder_training.patience):
-            print(f"[Encoder] early stopping at epoch {epoch}; best val_total={best_val:.3e}")
+            print(f"[Encoder] early stopping at epoch {epoch}; best train_total={best_train_total:.3e}")
             break
 
     if best_state is not None:
@@ -663,7 +793,8 @@ def train_encoder(
     ckpt_path = output_dir / cfg.encoder_training.model_filename
     checkpoint = {
         "version": "BMN-SCR-DD v0.3 Encoder",
-        "training_scheme": "frozen_decoder_guided: L_mu + lambda_observation * L_obs",
+        "training_scheme": "frozen_decoder_guided: L_mu + lambda_response * L_resp + lambda_observation * L_obs",
+        "lambda_response": history["lambda_response"][-1] if history["lambda_response"] else 0.0,
         "lambda_observation": lambda_obs,
         "model_state_dict": encoder.state_dict(),
         "config": asdict(cfg),
@@ -679,7 +810,7 @@ def train_encoder(
         "decoder_checkpoint_path": str(decoder_checkpoint_path),
         "encoder_dataset_path": str(encoder_dataset_path),
         "splits": {k: v.tolist() for k, v in splits.items()},
-        "best_val_total_loss": best_val,
+        "best_train_total_loss": best_train_total,
         "test_metrics": metrics,
     }
     torch.save(checkpoint, ckpt_path)

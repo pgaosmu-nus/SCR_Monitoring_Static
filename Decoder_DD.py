@@ -219,6 +219,15 @@ class EncoderTrainingConfig:
     history_filename: str = "BMN_DD_history.json"
     # Optional decoder-assisted losses. The paper baseline uses parameter loss only.
     lambda_response: float = 0.0
+    response_stage2_start_epoch: int = 1
+    response_loss_vars: List[str] = field(default_factory=lambda: ["theta", "T", "M"])
+    response_grad_target_ratio: float = 0.2
+    response_lambda_ema: float = 0.9
+    response_lambda_min: float = 1.0e-4
+    response_lambda_max: float = 10.0
+    response_bound_growth: float = 2.0
+    response_bound_saturation_steps: int = 100
+    response_scale_floor: float = 1.0e-6
     lambda_observation: float = 0.0
     # Soft physical-order penalty for current-profile parameters.
     # The training samples satisfy Us >= Ub; this term prevents the Encoder from

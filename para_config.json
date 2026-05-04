@@ -44,7 +44,7 @@
       "theta"
     ],
     "sensor_indices": [],
-    "sensor_s": [],
+    "sensor_s": [2350.0, 2375.0, 2400.0, 2425.0, 2450.0, 2475.0],
     "n_default_sensors": 6,
     "train_fraction": 0.8,
     "val_fraction": 0.1,
@@ -90,7 +90,20 @@
     "patience": 0,
     "model_filename": "BMN_DD_encoder.pth",
     "history_filename": "BMN_DD_history.json",
-    "lambda_response": 0.0,
+    "lambda_response": 1.0,
+    "response_stage2_start_epoch": 500,
+    "response_loss_vars": [
+      "theta",
+      "T",
+      "M"
+    ],
+    "response_grad_target_ratio": 1.0,
+    "response_lambda_ema": 0.9,
+    "response_lambda_min": 0.0001,
+    "response_lambda_max": 10.0,
+    "response_bound_growth": 2.0,
+    "response_bound_saturation_steps": 100,
+    "response_scale_floor": 1e-06,
     "lambda_observation": 0.0,
     "lambda_order": 0.0
   }
