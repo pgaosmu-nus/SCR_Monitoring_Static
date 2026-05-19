@@ -30,6 +30,7 @@ Notes
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import time
@@ -55,8 +56,10 @@ from paper_plot_style import (
     DEFAULT_EXPORT_CONFIG,
     DEFAULT_FIG_STYLE,
     apply_paper_style,
+    columns_to_rows,
     create_subplots,
     finalize_axes,
+    save_excel_workbook,
     save_figure,
 )
 
@@ -73,10 +76,9 @@ CONFIG_PATH = REPO_ROOT / "para_config.json"
 DECODER_CKPT_PATH = REPO_ROOT / "outputs" / "BMN_SCR_DD_outputs" / "Decoder_DD_model.pth"
 ENCODER_CKPT_PATH = REPO_ROOT / "outputs" / "BMN_SCR_DD_outputs" / "BMN_DD_encoder.pth"
 OUTPUT_ROOT = REPO_ROOT / "paper_outputs" / "4_2_bmn_inversion_validation"
+DEFAULT_EVAL_DATASET = REPO_ROOT / "paper_outputs" / "paper_testset_4_2_4_4_in_domain_exact.npz"
 
 # ---- Test-set settings ----
-RANDOM_TEST_N_CASES = 500
-RANDOM_TEST_SEED = 20260503
 SAVE_RANDOM_CASE_RAW_DATA = True
 
 # ---- Device for inference ----
@@ -182,24 +184,24 @@ def case_dict_to_array(case: Dict[str, Any]) -> np.ndarray:
     return np.asarray([case[name] for name in PARAM_NAMES], dtype=np.float32)
 
 
-def build_random_exact_test_set(cfg, n_cases: int, seed: int) -> List[Dict[str, Any]]:
-    rng = np.random.default_rng(seed)
+def dataset_to_case_list(dataset: Dict[str, Any], output_vars: List[str]) -> List[Dict[str, Any]]:
+    s = np.asarray(dataset["s"], dtype=np.float32)
+    params_all = np.asarray(dataset["params"], dtype=np.float32)
+    y_all = np.asarray(dataset["y"], dtype=np.float32)
     cases: List[Dict[str, Any]] = []
-    while len(cases) < n_cases:
-        sampled = sample_one_case(rng, cfg.ranges, cfg.physical)
-        exact = compute_exact_case(sampled, cfg.physical, cfg.exact_solver, cfg.dataset.n_nodes)
-        if exact is None:
-            continue
-        cases.append({"params": sampled, "exact": exact})
-        if len(cases) % max(1, n_cases // 10) == 0:
-            print(f"  exact inversion test cases collected: {len(cases)}/{n_cases}")
+    for i in range(y_all.shape[0]):
+        params = {name: float(params_all[i, j]) for j, name in enumerate(PARAM_NAMES)}
+        exact = {"s": s}
+        for j, name in enumerate(output_vars):
+            exact[name] = y_all[i, :, j]
+        cases.append({"params": params, "exact": exact})
     return cases
 
 
-def prepare_inference_tools(encoder_ckpt_path: str | Path, decoder_ckpt_path: str | Path) -> Dict[str, Any]:
-    encoder_model, encoder_ckpt = load_encoder_model(encoder_ckpt_path, map_location=DEVICE)
-    decoder_model, decoder_ckpt = load_decoder_model(decoder_ckpt_path, map_location=DEVICE)
-    encoder_model = encoder_model.to(DEVICE)
+def prepare_inference_tools(encoder_ckpt_path: str | Path, decoder_ckpt_path: str | Path, device: str) -> Dict[str, Any]:
+    encoder_model, encoder_ckpt = load_encoder_model(encoder_ckpt_path, map_location=device)
+    decoder_model, decoder_ckpt = load_decoder_model(decoder_ckpt_path, map_location=device)
+    encoder_model = encoder_model.to(device)
     encoder_model.eval()
     obs_scaler = StandardScaler.from_dict(encoder_ckpt["obs_scaler"])
     mu_scaler = StandardScaler.from_dict(encoder_ckpt["mu_scaler"])
@@ -218,6 +220,7 @@ def prepare_inference_tools(encoder_ckpt_path: str | Path, decoder_ckpt_path: st
         "observation_vars": observation_vars,
         "output_vars": output_vars,
         "obs_names": obs_names,
+        "device": device,
     }
 
 
@@ -244,12 +247,12 @@ def predict_case_from_exact(
     # Encoder prediction for mu
     obs_s = tools["obs_scaler"].transform(obs_true[None, :])
     with torch.no_grad():
-        mu_s = tools["encoder_model"](torch.tensor(obs_s, dtype=torch.float32, device=DEVICE)).detach().cpu().numpy()
+        mu_s = tools["encoder_model"](torch.tensor(obs_s, dtype=torch.float32, device=tools["device"])).detach().cpu().numpy()
     mu_pred = tools["mu_scaler"].inverse_transform(mu_s)[0]
 
     # Decoder reconstruction
     c = np.asarray([params["Dx"], params["ht"]], dtype=np.float32)
-    y_pred = decode_fullfield_np(tools["decoder_model"], tools["decoder_ckpt"], s, c, mu_pred, device=DEVICE)
+    y_pred = decode_fullfield_np(tools["decoder_model"], tools["decoder_ckpt"], s, c, mu_pred, device=tools["device"])
 
     # Reconstructed sparse observation
     obs_pred = extract_observations_from_fields(
@@ -404,11 +407,27 @@ def plot_training_history(history: Dict[str, Any], fig_dir: Path) -> None:
 
     finalize_axes(axes)
     save_figure(fig, fig_dir, "fig_4_2_encoder_training_history", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_2_encoder_training_history.xlsx",
+        {
+            "training_history": columns_to_rows(
+                {
+                    "epoch": epochs,
+                    "train_total": history.get("train_total", []),
+                    "validation_total": history.get("val_total", []),
+                    "train_mu": history.get("train_mu", []),
+                    "validation_mu": history.get("val_mu", []),
+                    "train_observation": history.get("train_observation", []),
+                    "validation_observation": history.get("val_observation", []),
+                }
+            )
+        },
+    )
     plt.close(fig)
 
 
 def plot_param_scatter(mu_true: np.ndarray, mu_pred: np.ndarray, fig_dir: Path) -> None:
-    names = ["Us", "Ub", "p"]
+    names = [r"$U_s$", r"$U_b$", r"$p$"]
     fig, axes = create_subplots(1, 3, kind="wide", style=FIG_STYLE)
     for i, ax in enumerate(axes):
         t = mu_true[:, i]
@@ -422,6 +441,21 @@ def plot_param_scatter(mu_true: np.ndarray, mu_pred: np.ndarray, fig_dir: Path) 
         ax.set_title(f"({chr(97+i)}) {names[i]}")
     finalize_axes(axes)
     save_figure(fig, fig_dir, "fig_4_2_parameter_scatter", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_2_parameter_scatter.xlsx",
+        {
+            "parameter_scatter": columns_to_rows(
+                {
+                    "Us_true": mu_true[:, 0],
+                    "Us_predicted": mu_pred[:, 0],
+                    "Ub_true": mu_true[:, 1],
+                    "Ub_predicted": mu_pred[:, 1],
+                    "p_true": mu_true[:, 2],
+                    "p_predicted": mu_pred[:, 2],
+                }
+            )
+        },
+    )
     plt.close(fig)
 
 
@@ -429,11 +463,104 @@ def plot_error_profile(s: np.ndarray, mae_profile: np.ndarray, output_vars: List
     fig, ax = create_subplots(kind="single", style=FIG_STYLE)
     for j, name in enumerate(output_vars):
         ax.plot(s, mae_profile[:, j], label=name)
-    ax.set_xlabel("s (m)")
+    ax.set_xlabel(r"$s$ ($\mathrm{m}$)")
     ax.set_ylabel("Mean absolute error")
     ax.set_title("BMN mean absolute response error along arc length")
     finalize_axes(ax)
     save_figure(fig, fig_dir, "fig_4_2_bmn_error_profile", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_2_bmn_error_profile.xlsx",
+        {"error_profile": columns_to_rows({"s_m": s, **{f"{name}_mae": mae_profile[:, j] for j, name in enumerate(output_vars)}})},
+    )
+    plt.close(fig)
+
+
+def plot_typical_case_collection(
+    cases: List[Dict[str, Any]],
+    case_results: Dict[str, Dict[str, Any]],
+    sensor_indices: np.ndarray,
+    output_vars: List[str],
+    fig_dir: Path,
+) -> None:
+    fig, axes = create_subplots(2, 2, kind="quad", style=FIG_STYLE)
+    idx = {name: i for i, name in enumerate(output_vars)}
+    ax1, ax2, ax3, ax4 = axes.flat
+    cmap = plt.get_cmap("tab10")
+
+    sensor_indices = np.asarray(sensor_indices, dtype=int)
+    if len(cases) > 0:
+        first_result = case_results[cases[0]["case_id"]]
+        s_ref = first_result["s"]
+        sensor_indices_safe = sensor_indices[(sensor_indices >= 0) & (sensor_indices < len(s_ref))]
+    else:
+        sensor_indices_safe = np.asarray([], dtype=int)
+
+    for row, case in enumerate(cases):
+        result = case_results[case["case_id"]]
+        s = result["s"]
+        y_true = result["y_true"]
+        y_pred = result["y_pred"]
+        color = cmap(row % 10)
+
+        exact_label = "Exact solver" if row == 0 else "_nolegend_"
+        recon_label = "BMN reconstruction" if row == 0 else "_nolegend_"
+        top_label = "Top point" if row == 0 else "_nolegend_"
+        obs_label = "Sparse obs" if row == 0 else "_nolegend_"
+        ax1.plot(y_true[:, idx["x"]], y_true[:, idx["z"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax1.plot(y_pred[:, idx["x"]], y_pred[:, idx["z"]], label=recon_label, color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
+        ax1.scatter(y_true[-1, idx["x"]], y_true[-1, idx["z"]], marker="o", label=top_label)
+
+        ax2.plot(s, y_true[:, idx["theta"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax2.plot(s, y_pred[:, idx["theta"]], label=recon_label, color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
+        ax2.scatter(s[sensor_indices_safe], y_true[sensor_indices_safe, idx["theta"]], marker="o", label=obs_label, color=[color])
+
+        ax3.plot(s, y_true[:, idx["T"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax3.plot(s, y_pred[:, idx["T"]], label=recon_label, color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
+        ax3.scatter(s[sensor_indices_safe], y_true[sensor_indices_safe, idx["T"]], marker="o", label=obs_label, color=[color])
+
+        ax4.plot(s, y_true[:, idx["M"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax4.plot(s, y_pred[:, idx["M"]], label=recon_label, color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
+        ax4.scatter(s[sensor_indices_safe], y_true[sensor_indices_safe, idx["M"]], marker="o", label=obs_label, color=[color])
+
+    ax1.set_xlabel(r"$x$ ($\mathrm{m}$)")
+    ax1.set_ylabel(r"$z$ ($\mathrm{m}$)")
+    ax1.set_title("(a) SCR configuration")
+    ax2.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax2.set_ylabel(r"$\theta$ ($\mathrm{rad}$)")
+    ax2.set_title("(b) Tangent angle")
+    ax3.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax3.set_ylabel(r"$T$ ($\mathrm{N}$)")
+    ax3.set_title("(c) Effective tension")
+    ax4.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax4.set_ylabel(r"$M$ ($\mathrm{N\,m}$)")
+    ax4.set_title("(d) Bending moment")
+
+    finalize_axes(axes, legend=False)
+    ax1.legend(frameon=False, loc="best")
+    fig.suptitle("Typical inversion-case response comparison", y=0.995)
+    save_figure(fig, fig_dir, "fig_4_2_typical_cases_all", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_2_typical_cases_all.xlsx",
+        {
+            case["case_id"]: columns_to_rows(
+                {
+                    "s_m": case_results[case["case_id"]]["s"],
+                    "x_exact_m": case_results[case["case_id"]]["y_true"][:, idx["x"]],
+                    "z_exact_m": case_results[case["case_id"]]["y_true"][:, idx["z"]],
+                    "theta_exact_rad": case_results[case["case_id"]]["y_true"][:, idx["theta"]],
+                    "T_exact_N": case_results[case["case_id"]]["y_true"][:, idx["T"]],
+                    "M_exact_N_m": case_results[case["case_id"]]["y_true"][:, idx["M"]],
+                    "x_bmn_m": case_results[case["case_id"]]["y_pred"][:, idx["x"]],
+                    "z_bmn_m": case_results[case["case_id"]]["y_pred"][:, idx["z"]],
+                    "theta_bmn_rad": case_results[case["case_id"]]["y_pred"][:, idx["theta"]],
+                    "T_bmn_N": case_results[case["case_id"]]["y_pred"][:, idx["T"]],
+                    "M_bmn_N_m": case_results[case["case_id"]]["y_pred"][:, idx["M"]],
+                }
+            )
+            for case in cases
+            if case["case_id"] in case_results
+        },
+    )
     plt.close(fig)
 
 
@@ -451,41 +578,60 @@ def plot_typical_case(
     fig, axes = create_subplots(2, 2, kind="quad", style=FIG_STYLE)
     ax1, ax2, ax3, ax4 = axes.flat
 
-    # Configuration
     ax1.plot(y_true[:, idx["x"]], y_true[:, idx["z"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax1.plot(y_pred[:, idx["x"]], y_pred[:, idx["z"]], label="BMN reconstruction", color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
     ax1.scatter(y_true[-1, idx["x"]], y_true[-1, idx["z"]], marker="o", label="Top point")
-    ax1.set_xlabel("x (m)")
-    ax1.set_ylabel("z (m)")
-    ax1.set_title("(a) SCR configuration")
 
-    # Theta with sparse observations
+    sensor_indices = np.asarray(sensor_indices, dtype=int)
+    sensor_indices = sensor_indices[(sensor_indices >= 0) & (sensor_indices < len(s))]
     ax2.plot(s, y_true[:, idx["theta"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax2.plot(s, y_pred[:, idx["theta"]], label="BMN reconstruction", color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
     ax2.scatter(s[sensor_indices], y_true[sensor_indices, idx["theta"]], marker="o", label="Sparse obs")
-    ax2.set_xlabel("s (m)")
-    ax2.set_ylabel(r"$\theta$ (rad)")
-    ax2.set_title("(b) Tangent angle")
 
-    # T with sparse observations
     ax3.plot(s, y_true[:, idx["T"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax3.plot(s, y_pred[:, idx["T"]], label="BMN reconstruction", color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
     ax3.scatter(s[sensor_indices], y_true[sensor_indices, idx["T"]], marker="o", label="Sparse obs")
-    ax3.set_xlabel("s (m)")
-    ax3.set_ylabel("T (N)")
-    ax3.set_title("(c) Effective tension")
 
-    # M with sparse observations
     ax4.plot(s, y_true[:, idx["M"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax4.plot(s, y_pred[:, idx["M"]], label="BMN reconstruction", color=MODEL_PRED_COLOR, linestyle=MODEL_PRED_LINESTYLE)
     ax4.scatter(s[sensor_indices], y_true[sensor_indices, idx["M"]], marker="o", label="Sparse obs")
-    ax4.set_xlabel("s (m)")
-    ax4.set_ylabel("M (N·m)")
+
+    ax1.set_xlabel(r"$x$ ($\mathrm{m}$)")
+    ax1.set_ylabel(r"$z$ ($\mathrm{m}$)")
+    ax1.set_title("(a) SCR configuration")
+    ax2.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax2.set_ylabel(r"$\theta$ ($\mathrm{rad}$)")
+    ax2.set_title("(b) Tangent angle")
+    ax3.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax3.set_ylabel(r"$T$ ($\mathrm{N}$)")
+    ax3.set_title("(c) Effective tension")
+    ax4.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax4.set_ylabel(r"$M$ ($\mathrm{N\,m}$)")
     ax4.set_title("(d) Bending moment")
 
     fig.suptitle(f"{case_id}: {desc}")
     finalize_axes(axes)
     save_figure(fig, fig_dir, f"fig_4_2_{case_id}", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / f"fig_4_2_{case_id}.xlsx",
+        {
+            case_id: columns_to_rows(
+                {
+                    "s_m": s,
+                    "x_exact_m": y_true[:, idx["x"]],
+                    "z_exact_m": y_true[:, idx["z"]],
+                    "theta_exact_rad": y_true[:, idx["theta"]],
+                    "T_exact_N": y_true[:, idx["T"]],
+                    "M_exact_N_m": y_true[:, idx["M"]],
+                    "x_bmn_m": y_pred[:, idx["x"]],
+                    "z_bmn_m": y_pred[:, idx["z"]],
+                    "theta_bmn_rad": y_pred[:, idx["theta"]],
+                    "T_bmn_N": y_pred[:, idx["T"]],
+                    "M_bmn_N_m": y_pred[:, idx["M"]],
+                }
+            )
+        },
+    )
     plt.close(fig)
 
 
@@ -495,28 +641,43 @@ def plot_typical_case(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Section 4.2 BMN inversion validation.")
+    parser.add_argument("--config", type=str, default=str(CONFIG_PATH))
+    parser.add_argument("--decoder_ckpt", type=str, default=str(DECODER_CKPT_PATH))
+    parser.add_argument("--encoder_ckpt", type=str, default=str(ENCODER_CKPT_PATH))
+    parser.add_argument("--output_root", type=str, default=str(OUTPUT_ROOT))
+    parser.add_argument("--eval_dataset", type=str, default=str(DEFAULT_EVAL_DATASET), help="Default shared exact-solver evaluation dataset. Override when needed.")
+    parser.add_argument("--device", type=str, default=DEVICE, choices=["cpu", "cuda"])
+    args = parser.parse_args()
+
     t0 = time.time()
     apply_paper_style(FIG_STYLE)
 
-    config_path = require_existing_file(CONFIG_PATH, "Config file")
-    decoder_ckpt_path = require_existing_file(DECODER_CKPT_PATH, "Decoder checkpoint")
-    encoder_ckpt_path = require_existing_file(ENCODER_CKPT_PATH, "Encoder checkpoint")
+    config_path = require_existing_file(args.config, "Config file")
+    decoder_ckpt_path = require_existing_file(args.decoder_ckpt, "Decoder checkpoint")
+    encoder_ckpt_path = require_existing_file(args.encoder_ckpt, "Encoder checkpoint")
+    eval_dataset_path = require_existing_file(args.eval_dataset, "Shared evaluation dataset")
 
-    out_root = ensure_dir(OUTPUT_ROOT)
+    out_root = ensure_dir(args.output_root)
     data_dir = ensure_dir(out_root / "data")
     fig_dir = ensure_dir(out_root / "figures")
     table_dir = ensure_dir(out_root / "tables")
 
     cfg = load_config(config_path)
-    tools = prepare_inference_tools(encoder_ckpt_path, decoder_ckpt_path)
+    device = args.device
+    tools = prepare_inference_tools(encoder_ckpt_path, decoder_ckpt_path, device=device)
+    eval_dataset = np.load(eval_dataset_path, allow_pickle=True)
+    eval_dataset_dict = {key: eval_dataset[key] for key in eval_dataset.files}
+    output_vars = [str(v) for v in eval_dataset_dict["output_vars"].tolist()]
+    random_cases = dataset_to_case_list(eval_dataset_dict, output_vars)
 
     run_info = {
         "config_path": str(config_path),
         "decoder_ckpt_path": str(decoder_ckpt_path),
         "encoder_ckpt_path": str(encoder_ckpt_path),
-        "random_test_n_cases": RANDOM_TEST_N_CASES,
-        "random_test_seed": RANDOM_TEST_SEED,
-        "device": DEVICE,
+        "eval_dataset_path": str(eval_dataset_path),
+        "n_eval_cases": int(len(random_cases)),
+        "device": device,
         "sensor_indices": tools["sensor_indices"].tolist(),
         "observation_vars": tools["observation_vars"],
         "obs_names": tools["obs_names"],
@@ -525,8 +686,9 @@ def main() -> None:
     save_json(run_info, data_dir / "run_info_4_2.json")
 
     print("=" * 88)
-    print("[4.2] Building random in-domain exact-solver test set...")
-    random_cases = build_random_exact_test_set(cfg, RANDOM_TEST_N_CASES, RANDOM_TEST_SEED)
+    print("[4.2] Loading shared exact-solver evaluation dataset...")
+    print(f"  dataset: {eval_dataset_path}")
+    print(f"  cases  : {len(random_cases)}")
 
     print("=" * 88)
     print("[4.2] Evaluating BMN on random inversion test set...")
@@ -593,6 +755,7 @@ def main() -> None:
     print("[4.2] Evaluating typical inversion cases...")
     typical_case_rows: List[Dict[str, Any]] = []
     typical_npz_data: Dict[str, Any] = {}
+    case_results: Dict[str, Dict[str, Any]] = {}
 
     for case in TYPICAL_CASES:
         exact = compute_exact_case(case, cfg.physical, cfg.exact_solver, cfg.dataset.n_nodes)
@@ -603,6 +766,11 @@ def main() -> None:
         y_exact = np.stack([np.asarray(exact[name], dtype=np.float32) for name in tools["output_vars"]], axis=-1)
         pred = predict_case_from_exact(tools, s, case, y_exact)
 
+        case_results[case["case_id"]] = {
+            "s": s,
+            "y_true": pred["y_true"],
+            "y_pred": pred["y_pred"],
+        }
         plot_typical_case(
             case_id=case["case_id"],
             desc=case["description"],
@@ -644,6 +812,15 @@ def main() -> None:
         row["M_max_pred"] = float(np.max(np.abs(pred["y_pred"][:, idx_M])))
         row["M_max_abs_error"] = float(abs(row["M_max_pred"] - row["M_max_true"]))
         typical_case_rows.append(row)
+
+    if case_results:
+        plot_typical_case_collection(
+            cases=TYPICAL_CASES,
+            case_results=case_results,
+            sensor_indices=tools["sensor_indices"],
+            output_vars=tools["output_vars"],
+            fig_dir=fig_dir,
+        )
 
     if typical_npz_data:
         np.savez_compressed(data_dir / "bmn_typical_cases.npz", **typical_npz_data)

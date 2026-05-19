@@ -1,6 +1,6 @@
 #!/bin/bash
 # 1. PBS job settings
-#PBS -N analysis_4_2
+#PBS -N analysis_4_3_1
 # Important: before submitting, run qstat -q to confirm auto_free is available.
 # If you see "Unknown Queue", change it to gpu.
 #PBS -q auto_free
@@ -41,4 +41,4 @@ echo "=================================="
 # 6. Run the research script
 # Use -u to ensure output is written to the log in real time.
 # python -u BMN_DD.py --mode all
-python -u analysis_4_2_bmn_inversion_validation.py
+python -u analysis_4_3_1_bmn_decoder_dataset_size_sensitivity.py

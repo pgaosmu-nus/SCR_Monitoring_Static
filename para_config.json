@@ -106,5 +106,44 @@
     "response_scale_floor": 1e-06,
     "lambda_observation": 0.0,
     "lambda_order": 0.0
+  },
+  "direct_mapping": {
+    "dataset_path": "outputs/BMN_SCR_DD_outputs/decoder_fullfield_dataset.npz",
+    "output_dir": "outputs/BMN_SCR_DD_outputs/DirectMapping_baseline",
+    "input_mode": "s_c_o",
+    "network": {
+      "hidden_dim": 256,
+      "num_hidden_layers": 5,
+      "activation": "gelu",
+      "dropout": 0.0
+    },
+    "training": {
+      "seed": 42,
+      "device": "cuda",
+      "epochs": 2000,
+      "batch_size": 8192,
+      "lr": 0.001,
+      "weight_decay": 0.0,
+      "grad_clip": 1.0,
+      "print_every": 100,
+      "patience": 300,
+      "model_filename": "DirectMapping_DD_model.pth",
+      "history_filename": "DirectMapping_DD_history.json"
+    }
+  },
+  "decoder_optimization": {
+    "dataset_path": "outputs/BMN_SCR_DD_outputs/decoder_fullfield_dataset.npz",
+    "decoder_ckpt": "outputs/BMN_SCR_DD_outputs/Decoder_DD_model.pth",
+    "encoder_ckpt_for_obs_scaler": "outputs/BMN_SCR_DD_outputs/BMN_DD_encoder.pth",
+    "output_dir": "outputs/BMN_SCR_DD_outputs/DecoderOptimization_baseline",
+    "device": "cpu",
+    "n_steps": 300,
+    "lr": 0.05,
+    "num_restarts": 1,
+    "lambda_order": 1.0,
+    "lbfgs_steps": 0,
+    "max_cases": null,
+    "split_seed": 42,
+    "save_loss_histories": true
   }
 }

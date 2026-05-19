@@ -53,8 +53,10 @@ from paper_plot_style import (
     DEFAULT_EXPORT_CONFIG,
     DEFAULT_FIG_STYLE,
     apply_paper_style,
+    columns_to_rows,
     create_subplots,
     finalize_axes,
+    save_excel_workbook,
     save_figure,
 )
 
@@ -83,8 +85,8 @@ DEVICE = "cpu"  # use "cuda" if available in your environment
 # Order of parameters: [Dx, ht, Us, Ub, p]
 TYPICAL_CASES: List[Dict[str, Any]] = [
     {
-        "case_id": "F1_low_flow",
-        "description": "Low-current interpolation case",
+        "case_id": "I1_low_flow",
+        "description": "Low-current inversion case",
         "Dx": 1800.0,
         "ht": 0.0,
         "Us": 0.80,
@@ -92,8 +94,8 @@ TYPICAL_CASES: List[Dict[str, Any]] = [
         "p": 0.170,
     },
     {
-        "case_id": "F2_baseline",
-        "description": "Baseline interpolation case",
+        "case_id": "I2_baseline",
+        "description": "Baseline inversion case",
         "Dx": 1800.0,
         "ht": 0.0,
         "Us": 1.50,
@@ -101,8 +103,8 @@ TYPICAL_CASES: List[Dict[str, Any]] = [
         "p": 0.240,
     },
     {
-        "case_id": "F3_high_flow",
-        "description": "High-current interpolation case",
+        "case_id": "I3_high_flow",
+        "description": "High-current inversion case",
         "Dx": 1800.0,
         "ht": 0.0,
         "Us": 2.20,
@@ -110,17 +112,8 @@ TYPICAL_CASES: List[Dict[str, Any]] = [
         "p": 0.300,
     },
     {
-        "case_id": "F4_short_span",
-        "description": "Small horizontal span interpolation case",
-        "Dx": 1720.0,
-        "ht": 0.0,
-        "Us": 1.50,
-        "Ub": 0.40,
-        "p": 0.240,
-    },
-    {
-        "case_id": "F5_long_span",
-        "description": "Large horizontal span interpolation case",
+        "case_id": "I4_long_span",
+        "description": "Large horizontal span inversion case",
         "Dx": 1880.0,
         "ht": 0.0,
         "Us": 1.50,
@@ -128,8 +121,8 @@ TYPICAL_CASES: List[Dict[str, Any]] = [
         "p": 0.240,
     },
     {
-        "case_id": "F6_top_offset",
-        "description": "Top-height-offset interpolation case",
+        "case_id": "I5_top_offset",
+        "description": "Top-height-offset inversion case",
         "Dx": 1800.0,
         "ht": 8.0,
         "Us": 1.50,
@@ -311,6 +304,73 @@ def plot_training_history(history: Dict[str, Any], fig_dir: Path) -> None:
     ax.set_yscale("log")
     finalize_axes(ax)
     save_figure(fig, fig_dir, "fig_4_1_decoder_training_history", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_1_decoder_training_history.xlsx",
+        {"training_history": columns_to_rows({"epoch": epochs, "train_loss": train_loss, "validation_loss": val_loss})},
+    )
+    plt.close(fig)
+
+
+def plot_typical_case_collection(cases: List[Dict[str, Any]], case_results: Dict[str, Dict[str, Any]], fig_dir: Path) -> None:
+    idx = {name: i for i, name in enumerate(OUTPUT_VARS)}
+    fig, axes = create_subplots(2, 2, kind="quad", style=FIG_STYLE)
+    ax1, ax2, ax3, ax4 = axes.flat
+
+    for row, case in enumerate(cases):
+        result = case_results[case["case_id"]]
+        s = result["s"]
+        y_true = result["y_true"]
+        y_pred = result["y_pred"]
+        exact_label = "Exact solver" if row == 0 else "_nolegend_"
+        pred_label = "Decoder" if row == 0 else "_nolegend_"
+        ax1.plot(y_true[:, idx["x"]], y_true[:, idx["z"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax1.plot(y_pred[:, idx["x"]], y_pred[:, idx["z"]], label=pred_label, color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
+        ax2.plot(s, y_true[:, idx["theta"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax2.plot(s, y_pred[:, idx["theta"]], label=pred_label, color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
+        ax3.plot(s, y_true[:, idx["T"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax3.plot(s, y_pred[:, idx["T"]], label=pred_label, color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
+        ax4.plot(s, y_true[:, idx["M"]], label=exact_label, color=EXACT_SOLVER_COLOR)
+        ax4.plot(s, y_pred[:, idx["M"]], label=pred_label, color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
+
+    ax1.set_xlabel(r"$x$ ($\mathrm{m}$)")
+    ax1.set_ylabel(r"$z$ ($\mathrm{m}$)")
+    ax1.set_title("(a) SCR configuration")
+    ax2.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax2.set_ylabel(r"$\theta$ ($\mathrm{rad}$)")
+    ax2.set_title("(b) Tangent angle")
+    ax3.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax3.set_ylabel(r"$T$ ($\mathrm{N}$)")
+    ax3.set_title("(c) Effective tension")
+    ax4.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax4.set_ylabel(r"$M$ ($\mathrm{N\,m}$)")
+    ax4.set_title("(d) Bending moment")
+
+    finalize_axes(axes, legend=False)
+    ax1.legend(frameon=False, loc="best")
+    fig.suptitle("Typical-case Decoder response comparison", y=0.995)
+    save_figure(fig, fig_dir, "fig_4_1_typical_cases_all", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_1_typical_cases_all.xlsx",
+        {
+            case["case_id"]: columns_to_rows(
+                {
+                    "s_m": case_results[case["case_id"]]["s"],
+                    "x_exact_m": case_results[case["case_id"]]["y_true"][:, idx["x"]],
+                    "z_exact_m": case_results[case["case_id"]]["y_true"][:, idx["z"]],
+                    "theta_exact_rad": case_results[case["case_id"]]["y_true"][:, idx["theta"]],
+                    "T_exact_N": case_results[case["case_id"]]["y_true"][:, idx["T"]],
+                    "M_exact_N_m": case_results[case["case_id"]]["y_true"][:, idx["M"]],
+                    "x_decoder_m": case_results[case["case_id"]]["y_pred"][:, idx["x"]],
+                    "z_decoder_m": case_results[case["case_id"]]["y_pred"][:, idx["z"]],
+                    "theta_decoder_rad": case_results[case["case_id"]]["y_pred"][:, idx["theta"]],
+                    "T_decoder_N": case_results[case["case_id"]]["y_pred"][:, idx["T"]],
+                    "M_decoder_N_m": case_results[case["case_id"]]["y_pred"][:, idx["M"]],
+                }
+            )
+            for case in cases
+            if case["case_id"] in case_results
+        },
+    )
     plt.close(fig)
 
 
@@ -321,31 +381,49 @@ def plot_typical_case(case_id: str, desc: str, s: np.ndarray, y_true: np.ndarray
 
     ax1.plot(y_true[:, idx["x"]], y_true[:, idx["z"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax1.plot(y_pred[:, idx["x"]], y_pred[:, idx["z"]], label="Decoder", color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
-    ax1.set_xlabel("x (m)")
-    ax1.set_ylabel("z (m)")
-    ax1.set_title("(a) SCR configuration")
-
     ax2.plot(s, y_true[:, idx["theta"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax2.plot(s, y_pred[:, idx["theta"]], label="Decoder", color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
-    ax2.set_xlabel("s (m)")
-    ax2.set_ylabel(r"$\theta$ (rad)")
-    ax2.set_title("(b) Tangent angle")
-
     ax3.plot(s, y_true[:, idx["T"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax3.plot(s, y_pred[:, idx["T"]], label="Decoder", color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
-    ax3.set_xlabel("s (m)")
-    ax3.set_ylabel("T (N)")
-    ax3.set_title("(c) Effective tension")
-
     ax4.plot(s, y_true[:, idx["M"]], label="Exact solver", color=EXACT_SOLVER_COLOR)
     ax4.plot(s, y_pred[:, idx["M"]], label="Decoder", color=DECODER_COLOR, linestyle=DECODER_LINESTYLE)
-    ax4.set_xlabel("s (m)")
-    ax4.set_ylabel("M (N·m)")
+
+    ax1.set_xlabel(r"$x$ ($\mathrm{m}$)")
+    ax1.set_ylabel(r"$z$ ($\mathrm{m}$)")
+    ax1.set_title("(a) SCR configuration")
+    ax2.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax2.set_ylabel(r"$\theta$ ($\mathrm{rad}$)")
+    ax2.set_title("(b) Tangent angle")
+    ax3.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax3.set_ylabel(r"$T$ ($\mathrm{N}$)")
+    ax3.set_title("(c) Effective tension")
+    ax4.set_xlabel(r"$s$ ($\mathrm{m}$)")
+    ax4.set_ylabel(r"$M$ ($\mathrm{N\,m}$)")
     ax4.set_title("(d) Bending moment")
 
     fig.suptitle(f"{case_id}: {desc}")
     finalize_axes(axes)
     save_figure(fig, fig_dir, f"fig_4_1_{case_id}", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / f"fig_4_1_{case_id}.xlsx",
+        {
+            case_id: columns_to_rows(
+                {
+                    "s_m": s,
+                    "x_exact_m": y_true[:, idx["x"]],
+                    "z_exact_m": y_true[:, idx["z"]],
+                    "theta_exact_rad": y_true[:, idx["theta"]],
+                    "T_exact_N": y_true[:, idx["T"]],
+                    "M_exact_N_m": y_true[:, idx["M"]],
+                    "x_decoder_m": y_pred[:, idx["x"]],
+                    "z_decoder_m": y_pred[:, idx["z"]],
+                    "theta_decoder_rad": y_pred[:, idx["theta"]],
+                    "T_decoder_N": y_pred[:, idx["T"]],
+                    "M_decoder_N_m": y_pred[:, idx["M"]],
+                }
+            )
+        },
+    )
     plt.close(fig)
 
 
@@ -353,11 +431,15 @@ def plot_error_profile(s: np.ndarray, mae_profile: np.ndarray, fig_dir: Path) ->
     fig, ax = create_subplots(kind="single", style=FIG_STYLE)
     for j, name in enumerate(OUTPUT_VARS):
         ax.plot(s, mae_profile[:, j], label=name)
-    ax.set_xlabel("s (m)")
+    ax.set_xlabel(r"$s$ ($\mathrm{m}$)")
     ax.set_ylabel("Mean absolute error")
     ax.set_title("Decoder mean absolute error profile along arc length")
     finalize_axes(ax)
     save_figure(fig, fig_dir, "fig_4_1_decoder_error_profile", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_1_decoder_error_profile.xlsx",
+        {"error_profile": columns_to_rows({"s_m": s, **{f"{name}_mae": mae_profile[:, j] for j, name in enumerate(OUTPUT_VARS)}})},
+    )
     plt.close(fig)
 
 
@@ -379,6 +461,10 @@ def plot_metric_bar(metrics: Dict[str, Dict[str, float]], fig_dir: Path) -> None
 
     finalize_axes(axes, legend=False)
     save_figure(fig, fig_dir, "fig_4_1_decoder_metrics_bar", style=FIG_STYLE, export=EXPORT_STYLE)
+    save_excel_workbook(
+        fig_dir / "fig_4_1_decoder_metrics_bar.xlsx",
+        {"metrics": [{"variable": var, "rmse": metrics[var]["rmse"], "nrmse": metrics[var]["nrmse"]} for var in vars_]},
+    )
     plt.close(fig)
 
 
@@ -470,6 +556,7 @@ def main() -> None:
     print("[4.1] Evaluating typical cases...")
     typical_case_rows: List[Dict[str, Any]] = []
     typical_npz_data: Dict[str, Any] = {}
+    case_results: Dict[str, Dict[str, Any]] = {}
 
     for case in TYPICAL_CASES:
         exact = compute_exact_case(case, cfg.physical, cfg.exact_solver, cfg.dataset.n_nodes)
@@ -482,7 +569,7 @@ def main() -> None:
         y_true = result["y_true"][0]
         y_pred = result["y_pred"][0]
 
-        # Save figure
+        case_results[case["case_id"]] = {"s": s, "y_true": y_true, "y_pred": y_pred}
         plot_typical_case(case["case_id"], case["description"], s, y_true, y_pred, fig_dir)
 
         # Save data into a single npz bundle later
@@ -509,6 +596,9 @@ def main() -> None:
             "M_max_abs_error": float(abs(np.max(np.abs(y_pred[:, idx_M])) - np.max(np.abs(y_true[:, idx_M])))),
         }
         typical_case_rows.append(row)
+
+    if case_results:
+        plot_typical_case_collection(TYPICAL_CASES, case_results, fig_dir)
 
     if typical_npz_data:
         np.savez_compressed(data_dir / "decoder_typical_cases.npz", **typical_npz_data)
