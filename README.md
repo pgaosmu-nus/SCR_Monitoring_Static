@@ -1,285 +1,143 @@
-# SCR_Monitoring_Static
+# BMN-SCR-DD: Static SCR Monitoring via Encoder-Decoder Pipeline
 
-Static SCR monitoring and inversion experiments based on a two-stage BMN-SCR-DD pipeline.
+This repository implements a two-stage **BMN (Bounded-parameter Neural Network)** inverse method for static Subsea Cable Route (SCR) monitoring and inversion.
 
-The current mainline workflow is:
+## BMN Method Overview
 
-1. train a data-driven `Decoder`
-2. freeze that Decoder
-3. train an `Encoder` that maps sparse observations to global parameters
-4. reconstruct the full SCR response through `Encoder -> Decoder`
+The BMN-SCR-DD pipeline consists of:
 
-## Overview
+1. **Decoder**: A data-driven forward model mapping parameters and conditions to full-field SCR response
+   - Trained on exact-solver-generated data
+   - Frozen during Encoder training
+2. **Encoder**: A neural network mapping sparse observations to global parameters
+   - Trained with the frozen Decoder as a differentiable constraint
+3. **Full Inverse**: `Observations -> Encoder -> Parameters -> Frozen Decoder -> Reconstructed Response`
 
-This repository currently contains three related tracks:
+**Key workflow**:
+1. Train a data-driven `Decoder` on exact solver outputs
+2. Freeze the Decoder 
+3. Train an `Encoder` using frozen Decoder constraints
+4. Reconstruct full SCR response via `Encoder -> Decoder`
 
-- `scr_exact_bvp_solver.py`: exact static SCR boundary-value solver
-- `Decoder_DD.py`: pure data-driven Decoder training and dataset generation
-- `BMN_DD.py`: Decoder-guided Encoder training and inverse inference
-
-The active inverse workflow is not end-to-end joint training. `BMN_DD.py` assumes a pre-trained Decoder checkpoint already exists, loads it in frozen mode, and then trains only the Encoder.
+The workflow is **not end-to-end joint training**. `BMN_DD.py` assumes a pre-trained Decoder checkpoint exists, loads it in frozen mode, and trains only the Encoder for improved efficiency and stability.
 
 ## BMN Formulation
 
-The variables are split into:
+### Variables
 
-- known conditions `c = [Dx, ht]`
-- unknown global parameters `mu = [Us, Ub, p]`
-- arc-length coordinate `s`
-- full response `y(s) = [x, z, theta, T, M]`
-- sparse observation `o = [x_top, z_top, T_i, M_i, theta_i, ...]`
-
-The current model roles are:
-
-- Decoder: `(s, c, mu) -> y(s)`
-- Encoder: `o -> mu_hat`
-- Full BMN inverse reconstruction: `o -> Encoder -> mu_hat -> Decoder -> y_hat`
-
-In `BMN_DD.py`, the Decoder is wrapped as a frozen differentiable forward model. It can provide observation-consistency gradients, but its parameters are not updated during Encoder training.
-
-## Repository Structure
-
-Main files:
-
-- `Decoder_DD.py`
-- `BMN_DD.py`
-- `scr_exact_bvp_solver.py`
-- `evaluate_decoder_test_exact_cases.py`
-- `evaluate_bmn_random_exact_cases.py`
-- `para_config.json`
-- `physics_config.json`
-
-Default outputs are now placed under:
-
-- `outputs/`
-
-Important default output subfolders:
-
-- `outputs/BMN_SCR_DD_outputs/`: trained checkpoints, datasets, histories, metrics
-- `outputs/decoder_test_exact_comparison/`: Decoder vs exact test-case figures
-- `outputs/bmn_random_exact_comparison/`: BMN inverse vs exact random-case figures
-
-## Physical Meaning
-
-The exact solver and data-driven models use the following default physical quantities:
-
-- geometry:
-  - `x(s)`, `z(s)`
-- internal response:
-  - `theta(s)`, `T(s)`, `M(s)`
-- known top conditions:
+- **Known boundary conditions**: `c = [Dx, ht]`
   - `Dx`: top horizontal offset
   - `ht`: top height parameter
-- current-profile parameters:
+- **Unknown global parameters**: `μ = [Us, Ub, p]`
   - `Us`: surface current velocity
-  - `Ub`: bottom current velocity
-  - `p`: current-profile exponent
+  - `Ub`: bottom current velocity  
+  - `p`: current-profile exponent (power-law)
+- **Arc-length coordinate**: `s`
+- **Full response**: `y(s) = [x, z, θ, T, M]`
+  - `x(s)`, `z(s)`: geometry
+  - `θ(s)`: internal angle
+  - `T(s)`: tension
+  - `M(s)`: bending moment
+- **Sparse observations**: `o = [x_top, z_top, T_i, M_i, θ_i, ...]`
 
-## Configuration Files
+### Architecture
 
-The main configuration is now split into two files:
+- **Decoder**: Maps `(s, c, μ) → y(s)` — pure data-driven forward model
+- **Encoder**: Maps `o → μ̂` — parameter estimator  
+- **Full inverse**: `o → Encoder → μ̂ → Decoder → ŷ`
 
-- `para_config.json`: ranges, dataset settings, network settings, training settings, output paths
-- `physics_config.json`: physical constants shared by the exact solver, Decoder data generation, and BMN inverse workflow
+### Training Strategy
 
-Both files are standard JSON files and should be edited without comments.
+The Decoder is wrapped as a **frozen differentiable forward model** in `BMN_DD.py`:
+- Provides observation-consistency gradients during Encoder training
+- Parameters remain fixed (not updated)
+- Ensures physically consistent reconstructions
 
-`physics_config.json` stores the `physical` block only. It is loaded through `para_config.json`, then merged into the runtime `cfg.physical` object used by:
+## Core Files
 
-- exact-case generation in `Decoder_DD.py`
-- frozen-Decoder Encoder-data generation in `BMN_DD.py`
-- exact-solver-based evaluation scripts
+- **[Decoder_DD.py](Decoder_DD.py)**: Decoder training pipeline
+  - Samples valid parameter cases and generates exact-solver data
+  - Trains pure data-driven Decoder on full-field responses
+  - Generates Encoder dataset from exact responses
 
-`para_config.json` points to `physics_config.json` through:
+- **[BMN_DD.py](BMN_DD.py)**: Encoder training and inverse inference  
+  - Uses frozen Decoder as forward model constraint
+  - Trains Encoder to map sparse observations to parameters
+  - Computes parameter-supervision and observation-consistency losses
 
-```text
-"physics_config": "physics_config.json"
-```
+- **[scr_exact_bvp_solver.py](scr_exact_bvp_solver.py)**: Exact static SCR boundary-value solver
+  - Reference physics implementation for generating training data
+  - Used for validation and test-set evaluation
 
-## Default Parameter Ranges
+- **[evaluate_bmn_random_exact_cases.py](evaluate_bmn_random_exact_cases.py)**: BMN inverse evaluation
+  - Compares BMN predictions to exact solver on random cases
+  - Generates comparison figures and metrics
 
-The current default ranges in `para_config.json` and `Decoder_DD.py` are:
+- **[evaluate_decoder_test_exact_cases.py](evaluate_decoder_test_exact_cases.py)**: Decoder forward validation
+  - Tests Decoder predictions against exact solver on held-out test set
+  - Quantifies Decoder approximation error
 
-```text
-Us in [0.5, 2.5]
-Ub in [0.0, 0.8]
-p  in [1/7, 1/3] = [0.142857..., 0.333333...]
-Dx in [1700.0, 1900.0] m
-ht in [-10.0, 10.0] m
-```
+- **[DecoderOptimizationInversion.py](DecoderOptimizationInversion.py)**: Alternative baseline method
+  - Joint end-to-end optimization of Decoder and Encoder
+  - Provides comparison point for BMN two-stage approach
+  - Useful for benchmarking and method evaluation
 
-Sampling constraints:
+- **[para_config.json](para_config.json)**: Main configuration file
+  - Dataset sizes, network architectures, training hyperparameters
+  - Output paths and logging settings
+  - References physics constants from `physics_config.json`
 
-- `Us >= Ub`
-- geometry admissibility must pass the built-in screen in `sample_one_case(...)`
+- **[physics_config.json](physics_config.json)**: Physical constants
+  - Pipe, water, and environmental parameters
+  - Shared by exact solver, Decoder, and Encoder
 
-## Default Physical Constants
+## Configuration
 
-Current default physical settings from `physics_config.json`:
+### para_config.json
 
-```text
-D_o = 0.4064 m
-t = 0.0254 m
-E_steel = 2.1e11 Pa
-rho_s = 7850 kg/m^3
-rho_w = 1025 kg/m^3
-g = 9.81 m/s^2
-C_d = 1.2
-L = 2500 m
-water_depth = 1000 m
-x_bottom = 0.0 m
-k_b = 5.0e3
-```
+Main runtime configuration controlling:
+- `decoder_n_cases`: Number of exact-solver cases for Decoder data
+- `encoder_n_cases`: Number of cases for Encoder data  
+- `n_nodes`: Number of arc-length discretization points
+- **Network architectures**: `hidden_dim`, `num_hidden_layers`, activation functions
+- **Training**: epochs, batch size, learning rate, patience, regularization
+- **Device**: CUDA or CPU
+- **Output paths**: `output_dir = outputs/BMN_SCR_DD_outputs`
 
-## Default Dataset and Training Settings
+Two dataset sizes are **intentionally separated**:
+- `decoder_n_cases`: Controls Decoder training data volume
+- `encoder_n_cases`: Controls Encoder training data volume
 
-Current defaults from `para_config.json`:
+### physics_config.json
 
-### Dataset
+Physical constants shared across the pipeline:
+- **Pipe**: diameter, thickness, steel properties
+- **Water**: density, depth, drag coefficient
+- **Environment**: gravity, cable length, bottom friction
+- **Geometry**: bottom position reference
 
-```text
-decoder_n_cases = 200
-encoder_n_cases = 20000
-n_nodes = 256
-seed = 42
-train_fraction = 0.8
-val_fraction = 0.1
-output_vars = [x, z, theta, T, M]
-observation_vars = [T, M, theta]
-n_default_sensors = 6
-output_dir = outputs/BMN_SCR_DD_outputs
-```
+## Typical Workflow
 
-If `sensor_indices` and `sensor_s` are left empty, internal sensors are generated automatically.
+### Step 1: Train Decoder
 
-### Decoder Network
-
-```text
-hidden_dim = 256
-num_hidden_layers = 5
-activation = tanh
-dropout = 0.0
-```
-
-### Decoder Training
-
-```text
-epochs = 2000
-batch_size = 8192
-lr = 1e-3
-weight_decay = 0.0
-grad_clip = 1.0
-patience = 300
-device = cuda
-```
-
-### Encoder Network
-
-```text
-architecture = bounded_mlp
-hidden_dim = 256
-num_hidden_layers = 4
-activation = gelu
-dropout = 0.0
-use_layer_norm = true
-bounded_output = true
-```
-
-### Encoder Training
-
-```text
-epochs = 1500
-batch_size = 128
-lr = 1e-3
-weight_decay = 0.0
-grad_clip = 1.0
-patience = 300
-lambda_observation = 0.0
-lambda_order = 0.0
-device = cuda
-```
-
-## Decoder Workflow
-
-`Decoder_DD.py` is responsible for:
-
-1. sampling valid parameter cases
-2. calling the exact solver
-3. generating `decoder_fullfield_dataset.npz`
-4. training a pure data-supervised Decoder
-5. optionally extracting an Encoder dataset from the exact-response dataset
-
-Core mapping:
-
-```text
-[s, Dx, ht, Us, Ub, p] -> [x, z, theta, T, M]
-```
-
-The Decoder is trained on scaled pointwise data assembled from full-field cases.
-
-## Encoder / BMN Workflow
-
-`BMN_DD.py` currently supports two Encoder-data routes:
-
-1. exact-dataset-derived observation data
-2. frozen-Decoder-generated observation data
-
-The active default path is:
-
-```text
-sample (c, mu)
--> frozen Decoder
--> full response y_D
--> sparse observation o_D
--> Encoder training pair (o_D, mu)
-```
-
-Encoder training loss is:
-
-```text
-L = L_mu + lambda_observation * L_obs + lambda_order * L_order
-```
-
-where:
-
-- `L_mu`: parameter supervision loss on `mu`
-- `L_obs`: observation consistency through the frozen Decoder
-- `L_order`: soft penalty for non-physical `Ub > Us`
-
-Important implementation note:
-
-- `BMN_DD.py` does not train `Decoder_DD`
-- it only reads a trained Decoder checkpoint
-- if the Decoder checkpoint does not exist, training stops with an error
-
-## Typical Usage
-
-### 1. Train Decoder
-
-Generate exact-solver Decoder data and train the Decoder:
+Generate exact-solver data and train the Decoder:
 
 ```bash
 python Decoder_DD.py --mode all
 ```
 
-Or split into steps:
-
+Alternatively, split into steps:
 ```bash
-python Decoder_DD.py --mode generate
-python Decoder_DD.py --mode train_decoder
+python Decoder_DD.py --mode generate  # Generate exact-solver cases
+python Decoder_DD.py --mode train_decoder  # Train Decoder
 ```
 
-This produces files under:
+**Outputs**:
+- `outputs/BMN_SCR_DD_outputs/decoder_fullfield_dataset.npz` — Decoder training data
+- `outputs/BMN_SCR_DD_outputs/Decoder_DD_model.pth` — Trained Decoder weights
+- `outputs/BMN_SCR_DD_outputs/Decoder_DD_history.json` — Training history
 
-- `outputs/BMN_SCR_DD_outputs/`
-
-especially:
-
-- `decoder_fullfield_dataset.npz`
-- `Decoder_DD_model.pth`
-- `Decoder_DD_history.json`
-
-### 2. Build Encoder Data
+### Step 2: Build Encoder Data
 
 Using the frozen Decoder:
 
@@ -287,102 +145,144 @@ Using the frozen Decoder:
 python BMN_DD.py --mode build_data
 ```
 
-This creates:
+**Output**:
+- `outputs/BMN_SCR_DD_outputs/bmn_encoder_dataset.npz` — Encoder training pairs (observations, parameters)
 
-- `outputs/BMN_SCR_DD_outputs/bmn_encoder_dataset.npz`
-
-### 3. Train Encoder
+### Step 3: Train Encoder
 
 ```bash
 python BMN_DD.py --mode train
 ```
 
-Or build data and train in one shot:
-
+Or combine steps 2 and 3:
 ```bash
 python BMN_DD.py --mode all
 ```
 
-This produces:
+**Outputs**:
+- `outputs/BMN_SCR_DD_outputs/BMN_DD_encoder.pth` — Trained Encoder weights
+- `outputs/BMN_SCR_DD_outputs/BMN_DD_history.json` — Training history  
+- `outputs/BMN_SCR_DD_outputs/BMN_DD_test_metrics.json` — Test metrics
 
-- `BMN_DD_encoder.pth`
-- `BMN_DD_history.json`
-- `BMN_DD_test_metrics.json`
+### Step 4: Evaluate on Test Cases
 
-all under:
-
-- `outputs/BMN_SCR_DD_outputs/`
-
-## Evaluation Scripts
-
-### Decoder vs Exact on held-out test set
-
+**Decoder validation** (Decoder vs exact forward):
 ```bash
 python evaluate_decoder_test_exact_cases.py
 ```
+Output: `outputs/decoder_test_exact_comparison/`
 
-Default output:
-
-- `outputs/decoder_test_exact_comparison/`
-
-### BMN inverse vs Exact on random cases
-
+**BMN validation** (Full inverse vs exact):
 ```bash
 python evaluate_bmn_random_exact_cases.py --n_cases 50 --device cpu
 ```
+Output: `outputs/bmn_random_exact_comparison/`
 
-This script:
+## Encoder Training Loss
 
-- samples 50 random valid cases
-- solves them with the exact solver
-- extracts observations using the trained Encoder's sensor layout
-- runs `Encoder -> Decoder`
-- saves one 4-panel figure per case
-- writes `evaluation_summary.json`
+The Encoder is trained with a composite loss:
 
-Default output:
+$$L = L_{\mu} + \lambda_{\text{obs}} \cdot L_{\text{obs}} + \lambda_{\text{order}} \cdot L_{\text{order}}$$
 
-- `outputs/bmn_random_exact_comparison/`
+where:
+- $L_{\mu}$: Parameter supervision loss on ground-truth parameters
+- $L_{\text{obs}}$: Observation consistency through frozen Decoder
+- $L_{\text{order}}$: Soft penalty for non-physical $U_b > U_s$
 
-## Config Notes
+## Method Comparison
 
-The main configuration lives in `para_config.json`, and physical constants live in `physics_config.json`.
+This repository includes a baseline method for comparison:
 
-Two dataset-size fields are intentionally separated:
+### Alternative: End-to-End Joint Optimization
 
-- `decoder_n_cases`: exact-solver cases used for Decoder dataset generation
-- `encoder_n_cases`: cases used for Encoder dataset generation
+**File**: [DecoderOptimizationInversion.py](DecoderOptimizationInversion.py)
 
-The legacy field `n_cases` is kept only for backward compatibility and should not be used as the main control anymore.
+A baseline approach that jointly optimizes Decoder and Encoder in an end-to-end fashion:
+- Trains Decoder and Encoder simultaneously
+- Direct comparison point for the two-stage BMN approach
+- Useful for understanding tradeoffs between joint vs. two-stage training
 
-## Current Status
+**Comparison perspective**:
+- BMN (two-stage, frozen Decoder): Better stability, lower computational load
+- Joint optimization: Potentially higher accuracy, more complex tuning
 
-With the current default setup:
+## Advantages of Two-Stage BMN Approach
 
-- Decoder and Encoder are trained in two stages
-- Encoder training is stable with large enough `encoder_n_cases`
-- `bounded_mlp` is active for Encoder training
-- all default outputs are centralized under `outputs/`
+1. **Efficiency**: Decoder training is decoupled from Encoder training
+2. **Stability**: Frozen Decoder provides consistent physical constraints
+3. **Modularity**: Can replace either component independently
+4. **Feasibility**: Reduces joint optimization complexity
 
-## Limitations
+## Key Implementation Notes
 
-- the main BMN path is still based on a frozen Decoder, not joint optimization
-- exact-solver success still depends on sampled-case feasibility
-- current observation layout is still configuration-driven, not automatically optimized
-- robustness to observation noise is not yet a first-class training feature
+- `BMN_DD.py` **requires** a pre-trained Decoder checkpoint
+  - Will stop with error if Decoder not found
+  - Ensures reproducibility of inverse results
+- The Decoder is wrapped as a **differentiable but frozen** forward model
+- All training outputs centralized in `outputs/BMN_SCR_DD_outputs/`
 
 ## Quick Start
 
-If you only want the shortest working path:
+Run the complete pipeline in three commands:
 
 ```bash
+# 1. Train Decoder (generates exact-solver data)
 python Decoder_DD.py --mode all
+
+# 2. Build Encoder data and train Encoder
 python BMN_DD.py --mode all
+
+# 3. Validate on random cases
 python evaluate_bmn_random_exact_cases.py --n_cases 50 --device cpu
 ```
 
-That will give you:
+This produces:
+- Trained Decoder and Encoder checkpoints
+- Comparison figures and metrics
+- Full outputs in `outputs/BMN_SCR_DD_outputs/`
 
-- a trained Decoder
-- a trained Encoder
-- random exact-case BMN-vs-exact comparison figures
+## Output Structure
+
+```
+outputs/BMN_SCR_DD_outputs/
+├── decoder_fullfield_dataset.npz      # Decoder training data
+├── Decoder_DD_model.pth               # Trained Decoder
+├── Decoder_DD_history.json            # Training history
+├── bmn_encoder_dataset.npz            # Encoder training pairs
+├── BMN_DD_encoder.pth                 # Trained Encoder
+├── BMN_DD_history.json                # Encoder history
+└── BMN_DD_test_metrics.json           # Test results
+
+outputs/decoder_test_exact_comparison/ # Decoder validation figures
+outputs/bmn_random_exact_comparison/   # BMN inverse validation figures
+```
+
+## Customization
+
+Key configuration parameters in `para_config.json`:
+
+| Parameter | Purpose |
+|-----------|---------|
+| `decoder_n_cases` | Number of exact-solver training cases for Decoder |
+| `encoder_n_cases` | Number of cases for Encoder training |
+| `hidden_dim` | Network hidden layer dimension |
+| `num_hidden_layers` | Network depth |
+| `epochs` | Training epochs |
+| `batch_size` | Training batch size |
+| `lr` | Learning rate |
+
+Physical parameters can be adjusted in `physics_config.json`.
+
+## Limitations & Future Work
+
+**Current limitations**:
+- Frozen Decoder approach (no joint optimization)
+- Exact solver feasibility-dependent sampling
+- Configuration-driven observation sensor layout
+- Limited observation noise robustness
+
+**Future improvements**:
+- Joint Encoder-Decoder optimization with warm-start
+- Automated optimal sensor placement
+- Noise-robust training strategies
+- Extension to dynamic scenarios

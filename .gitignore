@@ -1,6 +1,7 @@
 # Output folders
 outputs/
 paper_outputs/
+scripts/
 
 #VS code workspace settings
 *.code-workspace
@@ -8,6 +9,46 @@ paper_outputs/
 #Vanda logs and errors
 *.nfs*
 *.o*
+
+# ===== Paper-specific Analysis Scripts =====
+# These scripts generate results for paper writing/submission
+# They contain sensitive result data and are not part of core BMN method
+# 
+# GitHub-tracked files:
+#   - Core BMN: BMN_DD.py, Decoder_DD.py, scr_exact_bvp_solver.py
+#   - Evaluation: evaluate_bmn_random_exact_cases.py, evaluate_decoder_test_exact_cases.py
+#   - Comparison baseline: DecoderOptimizationInversion.py
+#   - Config: para_config.json, physics_config.json
+# ---
+analysis_4_2_bmn_inversion_validation.py
+analysis_4_2.o*
+analysis_4_3_bmn_dataset_size_sensitivity.py
+analysis_4_3.o*
+analysis_4_3_1_bmn_decoder_dataset_size_sensitivity.py
+analysis_4_3_1.o*
+analysis_4_5_bmn_sensor_layout_sensitivity.py
+analysis_4_5.o*
+analysis_4_bmn_sensitivity_utils.py
+
+# ===== Other Non-Core Scripts =====
+# Not part of BMN method or benchmarking
+# ---
+analysis_4_1_decoder_validation.py
+analysis_4_1.o*
+analysis_4_4_model_comparison.py
+analysis_4_4.o*
+analysis_4_4_outdomain.o*
+DirectMapping_DD.py
+DirectMapping_DD_Test.o*
+plot_directmapping_training_history.py
+generate_4_4_out_of_domain_testset.py
+generate_common_eval_dataset.py
+paper_plot_style.py
+run_analysis_*.log
+Manuscript*.docx
+Table*.xlsx
+table2*.xml
+temp.pbs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
