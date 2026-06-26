@@ -615,14 +615,17 @@ def train_encoder(
     history: Dict[str, List[float]] = {
         "train_total": [],
         "train_mu": [],
+        "train_field": [],
         "train_response": [],
         "train_observation": [],
         "train_order": [],
         "val_total": [],
         "val_mu": [],
+        "val_field": [],
         "val_response": [],
         "val_observation": [],
         "val_order": [],
+        "lambda_field": [],
         "lambda_response": [],
         "lambda_response_min": [],
         "lambda_response_max": [],
@@ -641,11 +644,11 @@ def train_encoder(
     print(f"Train/Val/Test cases: {len(splits['train'])}/{len(splits['val'])}/{len(splits['test'])}")
     print(f"Device       : {device}")
     print(f"Architecture : {str(getattr(cfg.encoder_network, 'architecture', 'dense_mlp'))}")
-    print(f"Loss         : L = L_mu + lambda_resp * L_resp + {lambda_obs:g} * L_obs + {lambda_order:g} * L_order")
+    print(f"Loss         : L = L_mu + lambda_field * L_field + {lambda_obs:g} * L_obs + {lambda_order:g} * L_order")
     if lambda_resp > 0.0:
         print(f"Response vars : {[output_vars[i] for i in response_var_indices]}")
         print(f"Stage-2 epoch : {response_stage2_start_epoch}")
-        print(f"Resp lambda   : min={response_lambda_min:g}, max={response_lambda_max:g}, target_grad_ratio={response_grad_target_ratio:g}")
+        print(f"Field lambda  : min={response_lambda_min:g}, max={response_lambda_max:g}, target_grad_ratio={response_grad_target_ratio:g}")
     print("=" * 88)
 
     encoder_params = [p for p in encoder.parameters() if p.requires_grad]
@@ -753,14 +756,17 @@ def train_encoder(
         lambda_resp_epoch = lambda_resp_epoch / max(n_batches, 1)
         history["train_total"].append(train_total)
         history["train_mu"].append(train_mu)
+        history["train_field"].append(train_response)
         history["train_response"].append(train_response)
         history["train_observation"].append(train_obs)
         history["train_order"].append(train_order)
         history["val_total"].append(float(val_losses["total"]))
         history["val_mu"].append(float(val_losses["mu"]))
+        history["val_field"].append(float(val_losses["response"]))
         history["val_response"].append(float(val_losses["response"]))
         history["val_observation"].append(float(val_losses["observation"]))
         history["val_order"].append(float(val_losses["order"]))
+        history["lambda_field"].append(float(lambda_resp_epoch))
         history["lambda_response"].append(float(lambda_resp_epoch))
         history["lambda_response_min"].append(float(response_lambda_min))
         history["lambda_response_max"].append(float(response_lambda_max))
@@ -776,11 +782,11 @@ def train_encoder(
         if epoch == 1 or epoch % int(cfg.encoder_training.print_every) == 0:
             print(
                 f"[Encoder] epoch={epoch:5d} | total={train_total:.3e} | mu={train_mu:.3e} | "
-                f"resp={train_response:.3e} | obs={train_obs:.3e} | order={train_order:.3e} | "
+                f"field={train_response:.3e} | obs={train_obs:.3e} | order={train_order:.3e} | "
                 f"val_total={val_losses['total']:.3e} | "
                 f"val_mu={val_losses['mu']:.3e} | val_obs={val_losses['observation']:.3e} | "
-                f"val_resp={val_losses['response']:.3e} | val_order={val_losses['order']:.3e} | "
-                f"lambda_resp={lambda_resp_epoch:.3e} [{response_lambda_min:.1e}, {response_lambda_max:.1e}] | "
+                f"val_field={val_losses['response']:.3e} | val_order={val_losses['order']:.3e} | "
+                f"lambda_field={lambda_resp_epoch:.3e} [{response_lambda_min:.1e}, {response_lambda_max:.1e}] | "
                 f"best_train_total={best_train_total:.3e} | elapsed={time.time() - t0:.1f}s"
             )
         if cfg.encoder_training.patience > 0 and no_improve >= int(cfg.encoder_training.patience):
@@ -793,7 +799,8 @@ def train_encoder(
     ckpt_path = output_dir / cfg.encoder_training.model_filename
     checkpoint = {
         "version": "BMN-SCR-DD v0.3 Encoder",
-        "training_scheme": "frozen_decoder_guided: L_mu + lambda_response * L_resp + lambda_observation * L_obs",
+        "training_scheme": "frozen_decoder_guided: L_mu + lambda_field * L_field + lambda_observation * L_obs",
+        "lambda_field": history["lambda_field"][-1] if history["lambda_field"] else 0.0,
         "lambda_response": history["lambda_response"][-1] if history["lambda_response"] else 0.0,
         "lambda_observation": lambda_obs,
         "model_state_dict": encoder.state_dict(),
