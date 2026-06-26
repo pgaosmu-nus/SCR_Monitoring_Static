@@ -278,11 +278,8 @@ Physical parameters can be adjusted in `physics_config.json`.
 **Current limitations**:
 - Frozen Decoder approach (no joint optimization)
 - Exact solver feasibility-dependent sampling
-- Configuration-driven observation sensor layout
-- Limited observation noise robustness
 
 **Future improvements**:
-- Joint Encoder-Decoder optimization with warm-start
 - Automated optimal sensor placement
-- Noise-robust training strategies
+- Physics informed network, reducing data dependency
 - Extension to dynamic scenarios
